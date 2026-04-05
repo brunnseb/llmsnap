@@ -411,7 +411,7 @@ func (p *Process) startUnloadMonitoring() {
 				}
 
 				if time.Since(p.getLastRequestHandled()) > maxDuration {
-					p.proxyLogger.Infof("<%s> Putting to sleep, TTL of %ds reached", p.ID, p.config.UnloadAfter)
+					p.proxyLogger.Infof("<%s> Making idle, TTL of %ds reached", p.ID, p.config.UnloadAfter)
 					p.MakeIdle()
 					return
 				}
