@@ -12,23 +12,87 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/napmany/llmsnap/event"
+	"github.com/klauspost/compress/zstd"
+	"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/ring"
+	"github.com/mostlygeek/llama-swap/proxy/cache"
 	"github.com/tidwall/gjson"
 )
 
-// TokenMetrics represents parsed token statistics from llama-server logs
+// zstdEncOptions are the shared zstd encoder options for maximum compression.
+var zstdEncOptions = []zstd.EOption{
+	zstd.WithEncoderLevel(zstd.SpeedBetterCompression),
+}
+
+// zstdDecOptions are the shared zstd decoder options.
+var zstdDecOptions = []zstd.DOption{}
+
+// zstdEncPool pools zstd.Encoder instances to reduce allocations.
+var zstdEncPool = &sync.Pool{
+	New: func() interface{} {
+		enc, _ := zstd.NewWriter(nil, zstdEncOptions...)
+		return enc
+	},
+}
+
+// zstdDecPool pools zstd.Decoder instances to reduce allocations.
+var zstdDecPool = &sync.Pool{
+	New: func() interface{} {
+		dec, _ := zstd.NewReader(nil, zstdDecOptions...)
+		return dec
+	},
+}
+
+// compressCapture marshals a ReqRespCapture to CBOR and compresses it with zstd.
+// Returns compressed bytes and the original CBOR byte count for logging.
+func compressCapture(c *ReqRespCapture) ([]byte, int, error) {
+	cborBytes, err := cbor.Marshal(c)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal capture: %w", err)
+	}
+	zenc := zstdEncPool.Get().(*zstd.Encoder)
+	defer zstdEncPool.Put(zenc)
+	return zenc.EncodeAll(cborBytes, nil), len(cborBytes), nil
+}
+
+// decompressCapture decompresses zstd-compressed CBOR and unmarshals it into a ReqRespCapture.
+func decompressCapture(data []byte) (*ReqRespCapture, error) {
+	dec := zstdDecPool.Get().(*zstd.Decoder)
+	defer zstdDecPool.Put(dec)
+	cborBytes, err := dec.DecodeAll(data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decompress capture: %w", err)
+	}
+	var capture ReqRespCapture
+	if err := cbor.Unmarshal(cborBytes, &capture); err != nil {
+		return nil, fmt.Errorf("unmarshal capture: %w", err)
+	}
+	return &capture, nil
+}
+
+// TokenMetrics holds token usage and performance metrics
 type TokenMetrics struct {
-	ID              int       `json:"id"`
-	Timestamp       time.Time `json:"timestamp"`
-	Model           string    `json:"model"`
-	CachedTokens    int       `json:"cache_tokens"`
-	InputTokens     int       `json:"input_tokens"`
-	OutputTokens    int       `json:"output_tokens"`
-	PromptPerSecond float64   `json:"prompt_per_second"`
-	TokensPerSecond float64   `json:"tokens_per_second"`
-	DurationMs      int       `json:"duration_ms"`
-	HasCapture      bool      `json:"has_capture"`
+	CachedTokens    int     `json:"cache_tokens"`
+	InputTokens     int     `json:"input_tokens"`
+	OutputTokens    int     `json:"output_tokens"`
+	PromptPerSecond float64 `json:"prompt_per_second"`
+	TokensPerSecond float64 `json:"tokens_per_second"`
+}
+
+// ActivityLogEntry represents parsed token statistics from llama-server logs
+type ActivityLogEntry struct {
+	ID              int          `json:"id"`
+	Timestamp       time.Time    `json:"timestamp"`
+	Model           string       `json:"model"`
+	ReqPath         string       `json:"req_path"`
+	RespContentType string       `json:"resp_content_type"`
+	RespStatusCode  int          `json:"resp_status_code"`
+	Tokens          TokenMetrics `json:"tokens"`
+	DurationMs      int          `json:"duration_ms"`
+	HasCapture      bool         `json:"has_capture"`
 }
 
 type ReqRespCapture struct {
@@ -40,145 +104,179 @@ type ReqRespCapture struct {
 	RespBody    []byte            `json:"resp_body"`
 }
 
-// Size returns the approximate memory usage of this capture in bytes
-func (c *ReqRespCapture) Size() int {
-	size := len(c.ReqPath) + len(c.ReqBody) + len(c.RespBody)
-	for k, v := range c.ReqHeaders {
-		size += len(k) + len(v)
-	}
-	for k, v := range c.RespHeaders {
-		size += len(k) + len(v)
-	}
-	return size
+// ActivityLogEvent represents a token metrics event
+type ActivityLogEvent struct {
+	Metrics ActivityLogEntry
 }
 
-// TokenMetricsEvent represents a token metrics event
-type TokenMetricsEvent struct {
-	Metrics TokenMetrics
-}
-
-func (e TokenMetricsEvent) Type() uint32 {
-	return TokenMetricsEventID // defined in events.go
+func (e ActivityLogEvent) Type() uint32 {
+	return ActivityLogEventID // defined in events.go
 }
 
 // metricsMonitor parses llama-server output for token statistics
 type metricsMonitor struct {
-	mu         sync.RWMutex
-	metrics    []TokenMetrics
-	maxMetrics int
-	nextID     int
-	logger     *LogMonitor
+	mu      sync.RWMutex
+	metrics ring.Buffer[ActivityLogEntry]
+	nextID  int
+	logger  *logmon.Monitor
 
 	// capture fields
 	enableCaptures bool
-	captures       map[int]ReqRespCapture // map for O(1) lookup by ID
-	captureOrder   []int                  // track insertion order for FIFO eviction
-	captureSize    int                    // current total size in bytes
-	maxCaptureSize int                    // max bytes for captures
+	captureCache   *cache.Cache // zstd-compressed CBOR of ReqRespCapture
 }
 
 // newMetricsMonitor creates a new metricsMonitor. captureBufferMB is the
 // capture buffer size in megabytes; 0 disables captures.
-func newMetricsMonitor(logger *LogMonitor, maxMetrics int, captureBufferMB int) *metricsMonitor {
-	return &metricsMonitor{
+func newMetricsMonitor(logger *logmon.Monitor, maxMetrics int, captureBufferMB int) *metricsMonitor {
+	mm := &metricsMonitor{
 		logger:         logger,
-		maxMetrics:     maxMetrics,
+		metrics:        ring.NewBuffer[ActivityLogEntry](maxMetrics),
 		enableCaptures: captureBufferMB > 0,
-		captures:       make(map[int]ReqRespCapture),
-		captureOrder:   make([]int, 0),
-		captureSize:    0,
-		maxCaptureSize: captureBufferMB * 1024 * 1024,
 	}
+	if captureBufferMB > 0 {
+		mm.captureCache = cache.New(captureBufferMB * 1024 * 1024)
+	}
+	return mm
 }
 
-// addMetrics adds a new metric to the collection and publishes an event.
-// Returns the assigned metric ID.
-func (mp *metricsMonitor) addMetrics(metric TokenMetrics) int {
+// queueMetrics adds a new metric to the collection without emitting an event.
+// Returns the assigned metric ID. Call emitMetric after capture setup.
+func (mp *metricsMonitor) queueMetrics(metric ActivityLogEntry) int {
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 
 	metric.ID = mp.nextID
 	mp.nextID++
-	mp.metrics = append(mp.metrics, metric)
-	if len(mp.metrics) > mp.maxMetrics {
-		mp.metrics = mp.metrics[len(mp.metrics)-mp.maxMetrics:]
-	}
-	event.Emit(TokenMetricsEvent{Metrics: metric})
+	mp.metrics.Push(metric)
 	return metric.ID
 }
 
-// addCapture adds a new capture to the buffer with size-based eviction.
-// Captures are skipped if enableCaptures is false or if capture exceeds maxCaptureSize.
-func (mp *metricsMonitor) addCapture(capture ReqRespCapture) {
+// emitMetric publishes an ActivityLogEvent for the given metric.
+func (mp *metricsMonitor) emitMetric(metric ActivityLogEntry) {
+	event.Emit(ActivityLogEvent{Metrics: metric})
+}
+
+// addCapture compresses and stores a capture in the cache.
+// Returns true if the capture was stored, false otherwise.
+func (mp *metricsMonitor) addCapture(capture ReqRespCapture) bool {
 	if !mp.enableCaptures {
-		return
+		return false
 	}
 
-	mp.mu.Lock()
-	defer mp.mu.Unlock()
-
-	captureSize := capture.Size()
-	if captureSize > mp.maxCaptureSize {
-		mp.logger.Warnf("capture size %d exceeds max %d, skipping", captureSize, mp.maxCaptureSize)
-		return
+	compressed, uncompressedBytes, err := compressCapture(&capture)
+	if err != nil {
+		mp.logger.Warnf("failed to compress capture: %v, skipping", err)
+		return false
 	}
 
-	// Evict oldest (FIFO) until room available
-	for mp.captureSize+captureSize > mp.maxCaptureSize && len(mp.captureOrder) > 0 {
-		oldestID := mp.captureOrder[0]
-		mp.captureOrder = mp.captureOrder[1:]
-		if evicted, exists := mp.captures[oldestID]; exists {
-			mp.captureSize -= evicted.Size()
-			delete(mp.captures, oldestID)
+	if err := mp.captureCache.Add(capture.ID, compressed); err != nil {
+		mp.logger.Warnf("capture %d too large (%d bytes), skipping: %v", capture.ID, len(compressed), err)
+		return false
+	}
+
+	compressionRatio := (1 - float64(len(compressed))/float64(uncompressedBytes)) * 100
+	mp.logger.Debugf("Capture %d compressed and saved: %d bytes -> %d bytes (%.1f%% compression)", capture.ID, uncompressedBytes, len(compressed), compressionRatio)
+	return true
+}
+
+// getCompressedBytes returns the raw compressed bytes for a capture by ID.
+func (mp *metricsMonitor) getCompressedBytes(id int) ([]byte, bool) {
+	if mp.captureCache == nil {
+		return nil, false
+	}
+	data, err := mp.captureCache.Get(id)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
+}
+
+// getCaptureByID decompresses and unmarshals a capture by ID.
+// Returns nil if the capture is not found or decompression fails.
+func (mp *metricsMonitor) getCaptureByID(id int) *ReqRespCapture {
+	if mp.captureCache == nil {
+		return nil
+	}
+	data, exists := mp.getCompressedBytes(id)
+	if !exists {
+		return nil
+	}
+
+	capture, err := decompressCapture(data)
+	if err != nil {
+		mp.logger.Warnf("failed to decompress capture %d: %v", id, err)
+		return nil
+	}
+
+	return capture
+}
+
+// getMetrics returns a copy of the current metrics with HasCapture resolved from cache.
+func (mp *metricsMonitor) getMetrics() []ActivityLogEntry {
+	mp.mu.RLock()
+	defer mp.mu.RUnlock()
+
+	result := mp.metrics.Slice()
+	if result == nil {
+		return []ActivityLogEntry{}
+	}
+	if mp.captureCache != nil {
+		for i := range result {
+			result[i].HasCapture = mp.captureCache.Has(result[i].ID)
 		}
 	}
-
-	mp.captures[capture.ID] = capture
-	mp.captureOrder = append(mp.captureOrder, capture.ID)
-	mp.captureSize += captureSize
-}
-
-// getCaptureByID returns a capture by its ID, or nil if not found.
-func (mp *metricsMonitor) getCaptureByID(id int) *ReqRespCapture {
-	mp.mu.RLock()
-	defer mp.mu.RUnlock()
-
-	if capture, exists := mp.captures[id]; exists {
-		return &capture
-	}
-	return nil
-}
-
-// getMetrics returns a copy of the current metrics
-func (mp *metricsMonitor) getMetrics() []TokenMetrics {
-	mp.mu.RLock()
-	defer mp.mu.RUnlock()
-
-	result := make([]TokenMetrics, len(mp.metrics))
-	copy(result, mp.metrics)
 	return result
 }
 
-// getMetricsJSON returns metrics as JSON
+// getMetricsJSON returns metrics as JSON with HasCapture resolved from cache.
 func (mp *metricsMonitor) getMetricsJSON() ([]byte, error) {
 	mp.mu.RLock()
 	defer mp.mu.RUnlock()
-	return json.Marshal(mp.metrics)
+
+	result := mp.metrics.Slice()
+	if result == nil {
+		return json.Marshal([]ActivityLogEntry{})
+	}
+	if mp.captureCache != nil {
+		for i := range result {
+			result[i].HasCapture = mp.captureCache.Has(result[i].ID)
+		}
+	}
+	return json.Marshal(result)
 }
 
-// wrapHandler wraps the proxy handler to extract token metrics
+// Capture field flags for controlling what is saved in ReqRespCapture.
+type captureFields uint
+
+const (
+	captureNone captureFields = 1 << iota
+	captureReqHeaders
+	captureReqBody
+	captureRespHeaders
+	captureRespBody
+)
+
+const (
+	captureReqAll  = captureReqHeaders | captureReqBody
+	captureRespAll = captureRespHeaders | captureRespBody
+	captureAll     = captureReqAll | captureRespAll
+)
+
+// wrapHandler wraps the proxy handler to extract token metrics.
+// captureFields controls what is saved in the ReqRespCapture using bitwise flags.
 // if wrapHandler returns an error it is safe to assume that no
 // data was sent to the client
 func (mp *metricsMonitor) wrapHandler(
 	modelID string,
 	writer gin.ResponseWriter,
 	request *http.Request,
+	captureFields captureFields,
 	next func(modelID string, w http.ResponseWriter, r *http.Request) error,
 ) error {
 	// Capture request body and headers if captures enabled
 	var reqBody []byte
 	var reqHeaders map[string]string
-	if mp.enableCaptures {
+	if mp.enableCaptures && (captureFields&captureReqBody) != 0 {
 		if request.Body != nil {
 			var err error
 			reqBody, err = io.ReadAll(request.Body)
@@ -188,6 +286,8 @@ func (mp *metricsMonitor) wrapHandler(
 			request.Body.Close()
 			request.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 		}
+	}
+	if mp.enableCaptures && (captureFields&captureReqHeaders) != 0 {
 		reqHeaders = make(map[string]string)
 		for key, values := range request.Header {
 			if len(values) > 0 {
@@ -212,23 +312,28 @@ func (mp *metricsMonitor) wrapHandler(
 	// after this point we have to assume that data was sent to the client
 	// and we can only log errors but not send them to clients
 
-	if recorder.Status() != http.StatusOK {
-		errorMsg := string(recorder.body.Bytes())
-		mp.logger.Warnf("metrics skipped, HTTP status=%d, path=%s, error=%s", recorder.Status(), request.URL.Path, errorMsg)
-		return nil
+	// Initialize default metrics - recorded for every request
+	tm := ActivityLogEntry{
+		Timestamp:       time.Now(),
+		Model:           modelID,
+		ReqPath:         request.URL.Path,
+		RespContentType: recorder.Header().Get("Content-Type"),
+		RespStatusCode:  recorder.Status(),
+		DurationMs:      int(time.Since(recorder.StartTime()).Milliseconds()),
 	}
 
-	// Initialize default metrics - these will always be recorded
-	tm := TokenMetrics{
-		Timestamp:  time.Now(),
-		Model:      modelID,
-		DurationMs: int(time.Since(recorder.StartTime()).Milliseconds()),
+	if recorder.Status() != http.StatusOK {
+		mp.logger.Warnf("non-200 response, recording partial metrics: status=%d, path=%s", recorder.Status(), request.URL.Path)
+		tm.ID = mp.queueMetrics(tm)
+		mp.emitMetric(tm)
+		return nil
 	}
 
 	body := recorder.body.Bytes()
 	if len(body) == 0 {
 		mp.logger.Warn("metrics: empty body, recording minimal metrics")
-		mp.addMetrics(tm)
+		tm.ID = mp.queueMetrics(tm)
+		mp.emitMetric(tm)
 		return nil
 	}
 
@@ -238,7 +343,8 @@ func (mp *metricsMonitor) wrapHandler(
 		body, err = decompressBody(body, encoding)
 		if err != nil {
 			mp.logger.Warnf("metrics: decompression failed: %v, path=%s, recording minimal metrics", err, request.URL.Path)
-			mp.addMetrics(tm)
+			tm.ID = mp.queueMetrics(tm)
+			mp.emitMetric(tm)
 			return nil
 		}
 	}
@@ -246,7 +352,8 @@ func (mp *metricsMonitor) wrapHandler(
 		if parsed, err := processStreamingResponse(modelID, recorder.RequestTime(), body); err != nil {
 			mp.logger.Warnf("error processing streaming response: %v, path=%s, recording minimal metrics", err, request.URL.Path)
 		} else {
-			tm = parsed
+			tm.Tokens = parsed.Tokens
+			tm.DurationMs = parsed.DurationMs
 		}
 	} else {
 		if gjson.ValidBytes(body) {
@@ -262,11 +369,13 @@ func (mp *metricsMonitor) wrapHandler(
 				}
 			}
 
-			// Track metrics even if usage/timings are missing (graceful degradation)
-			if parsedMetrics, err := parseMetrics(modelID, recorder.RequestTime(), usage, timings); err != nil {
-				mp.logger.Warnf("error parsing metrics: %v, path=%s, recording minimal metrics", err, request.URL.Path)
-			} else {
-				tm = parsedMetrics
+			if usage.Exists() || timings.Exists() {
+				if parsedMetrics, err := parseMetrics(modelID, recorder.StartTime(), usage, timings); err != nil {
+					mp.logger.Warnf("error parsing metrics: %v, path=%s, recording minimal metrics", err, request.URL.Path)
+				} else {
+					tm.Tokens = parsedMetrics.Tokens
+					tm.DurationMs = parsedMetrics.DurationMs
+				}
 			}
 		} else {
 			mp.logger.Warnf("metrics: invalid JSON in response body path=%s, recording minimal metrics", request.URL.Path)
@@ -276,159 +385,214 @@ func (mp *metricsMonitor) wrapHandler(
 	// Build capture if enabled and determine if it will be stored
 	var capture *ReqRespCapture
 	if mp.enableCaptures {
-		respHeaders := make(map[string]string)
-		for key, values := range recorder.Header() {
-			if len(values) > 0 {
-				respHeaders[key] = values[0]
+		var respHeaders map[string]string
+		var respBody []byte
+		if (captureFields & captureRespHeaders) != 0 {
+			respHeaders = make(map[string]string)
+			for key, values := range recorder.Header() {
+				if len(values) > 0 {
+					respHeaders[key] = values[0]
+				}
 			}
+			redactHeaders(respHeaders)
+			delete(respHeaders, "Content-Encoding")
 		}
-		redactHeaders(respHeaders)
-		delete(respHeaders, "Content-Encoding")
+		if (captureFields & captureRespBody) != 0 {
+			respBody = body
+		}
 		capture = &ReqRespCapture{
 			ReqPath:     request.URL.Path,
 			ReqHeaders:  reqHeaders,
 			ReqBody:     reqBody,
 			RespHeaders: respHeaders,
-			RespBody:    body,
-		}
-		// Only set HasCapture if the capture will actually be stored (not too large)
-		if capture.Size() <= mp.maxCaptureSize {
-			tm.HasCapture = true
+			RespBody:    respBody,
 		}
 	}
 
-	metricID := mp.addMetrics(tm)
+	metricID := mp.queueMetrics(tm)
+	tm.ID = metricID
 
 	// Store capture if enabled
 	if capture != nil {
 		capture.ID = metricID
-		mp.addCapture(*capture)
+		if mp.addCapture(*capture) {
+			tm.HasCapture = true
+		}
 	}
+
+	mp.emitMetric(tm)
 
 	return nil
 }
 
-func processStreamingResponse(modelID string, start time.Time, body []byte) (TokenMetrics, error) {
-	// Iterate **backwards** through the body looking for the data payload with
-	// usage data. This avoids allocating a slice of all lines via bytes.Split.
+// usagePaths lists the JSON paths where a per-event usage object can live.
+// v1/chat/completions puts it at top-level "usage"; v1/responses nests under
+// "response.usage"; v1/messages emits it at "message.usage" on message_start
+// and at "usage" on message_delta.
+var usagePaths = []string{"usage", "response.usage", "message.usage"}
 
-	// Start from the end of the body and scan backwards for newlines
-	pos := len(body)
-	foundValidJSON := false
-	for pos > 0 {
-		// Find the previous newline (or start of body)
-		lineStart := bytes.LastIndexByte(body[:pos], '\n')
-		if lineStart == -1 {
-			lineStart = 0
+// extractUsageTokens reads input/output/cached token counts from a usage
+// gjson.Result, handling the field-name differences across endpoints.
+// cached returns -1 when the field is absent. ok is true when at least one
+// field was present.
+func extractUsageTokens(usage gjson.Result) (input, output, cached int64, ok bool) {
+	cached = -1
+	if !usage.Exists() {
+		return
+	}
+
+	if v := usage.Get("prompt_tokens"); v.Exists() {
+		// v1/chat/completions
+		input = v.Int()
+		ok = true
+	} else if v := usage.Get("input_tokens"); v.Exists() {
+		// v1/messages, v1/responses
+		input = v.Int()
+		ok = true
+	}
+
+	if v := usage.Get("completion_tokens"); v.Exists() {
+		// v1/chat/completions
+		output = v.Int()
+		ok = true
+	} else if v := usage.Get("output_tokens"); v.Exists() {
+		// v1/messages, v1/responses
+		output = v.Int()
+		ok = true
+	}
+
+	if v := usage.Get("cache_read_input_tokens"); v.Exists() {
+		// v1/messages (Anthropic)
+		cached = v.Int()
+		ok = true
+	} else if v := usage.Get("input_tokens_details.cached_tokens"); v.Exists() {
+		// v1/responses (OpenAI Responses API)
+		cached = v.Int()
+		ok = true
+	} else if v := usage.Get("prompt_tokens_details.cached_tokens"); v.Exists() {
+		// v1/chat/completions (OpenAI cache hits)
+		cached = v.Int()
+		ok = true
+	}
+	return
+}
+
+func processStreamingResponse(modelID string, start time.Time, body []byte) (ActivityLogEntry, error) {
+	// Walk SSE "data:" lines forward, merging usage info from every event.
+	// Different endpoints split usage across events:
+	//   - v1/chat/completions: usage on the final chunk before [DONE]
+	//   - v1/responses:        usage on response.completed (response.usage)
+	//   - v1/messages:         input + cache on message_start (message.usage),
+	//                          output_tokens on message_delta (usage)
+	// We take the latest informative value per field so all three are covered.
+
+	var (
+		inputTokens, outputTokens int64
+		cachedTokens              int64 = -1
+		hasAny                    bool
+		timings                   gjson.Result
+	)
+
+	prefix := []byte("data:")
+	for offset := 0; offset < len(body); {
+		nl := bytes.IndexByte(body[offset:], '\n')
+		var line []byte
+		if nl == -1 {
+			line = body[offset:]
+			offset = len(body)
 		} else {
-			lineStart++ // Move past the newline
+			line = body[offset : offset+nl]
+			offset += nl + 1
 		}
 
-		line := bytes.TrimSpace(body[lineStart:pos])
-		pos = lineStart - 1 // Move position before the newline for next iteration
-
-		if len(line) == 0 {
-			continue
-		}
-
-		// SSE payload always follows "data:"
-		prefix := []byte("data:")
-		if !bytes.HasPrefix(line, prefix) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || !bytes.HasPrefix(line, prefix) {
 			continue
 		}
 		data := bytes.TrimSpace(line[len(prefix):])
-
-		if len(data) == 0 {
+		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 			continue
 		}
-
-		if bytes.Equal(data, []byte("[DONE]")) {
-			// [DONE] line itself contains nothing of interest.
+		if !gjson.ValidBytes(data) {
 			continue
 		}
+		parsed := gjson.ParseBytes(data)
 
-		if gjson.ValidBytes(data) {
-			foundValidJSON = true
-			parsed := gjson.ParseBytes(data)
-			usage := parsed.Get("usage")
-			timings := parsed.Get("timings")
-
-			if usage.Exists() || timings.Exists() {
-				return parseMetrics(modelID, start, usage, timings)
+		for _, path := range usagePaths {
+			u := parsed.Get(path)
+			if !u.Exists() {
+				continue
+			}
+			i, o, c, ok := extractUsageTokens(u)
+			if !ok {
+				continue
+			}
+			hasAny = true
+			// Take the latest non-zero value so message_start's input_tokens
+			// is preserved when message_delta's usage omits it, and vice versa
+			// for output_tokens.
+			if i > 0 {
+				inputTokens = i
+			}
+			if o > 0 {
+				outputTokens = o
+			}
+			if c >= 0 {
+				cachedTokens = c
 			}
 		}
+		if t := parsed.Get("timings"); t.Exists() {
+			timings = t
+			hasAny = true
+		}
 	}
 
-	// If we found valid JSON but no usage/timings, still track the activity with unknown values
-	if foundValidJSON {
-		return parseMetrics(modelID, start, gjson.Result{}, gjson.Result{})
+	if !hasAny {
+		return ActivityLogEntry{}, fmt.Errorf("no valid JSON data found in stream")
 	}
 
-	return TokenMetrics{}, fmt.Errorf("no valid JSON data found in stream")
+	return buildMetrics(modelID, start, inputTokens, outputTokens, cachedTokens, timings), nil
 }
 
-func parseMetrics(modelID string, start time.Time, usage, timings gjson.Result) (TokenMetrics, error) {
-	// default values
-	cachedTokens := -1 // unknown or missing data
-	outputTokens := 0
-	inputTokens := 0
+func parseMetrics(modelID string, start time.Time, usage, timings gjson.Result) (ActivityLogEntry, error) {
+	input, output, cached, _ := extractUsageTokens(usage)
+	return buildMetrics(modelID, start, input, output, cached, timings), nil
+}
 
-	// timings data
+// buildMetrics composes an ActivityLogEntry from accumulated token counts and
+// optional llama-server timings (which override input/output and provide rates).
+func buildMetrics(modelID string, start time.Time, inputTokens, outputTokens, cachedTokens int64, timings gjson.Result) ActivityLogEntry {
+	wallDurationMs := int(time.Since(start).Milliseconds())
+	durationMs := wallDurationMs
 	tokensPerSecond := -1.0
 	promptPerSecond := -1.0
-	durationMs := int(time.Since(start).Milliseconds())
 
-	if usage.Exists() {
-		if pt := usage.Get("prompt_tokens"); pt.Exists() {
-			// v1/chat/completions
-			inputTokens = int(pt.Int())
-		} else if it := usage.Get("input_tokens"); it.Exists() {
-			// v1/messages
-			inputTokens = int(it.Int())
-		}
-
-		if ct := usage.Get("completion_tokens"); ct.Exists() {
-			// v1/chat/completions
-			outputTokens = int(ct.Int())
-		} else if ot := usage.Get("output_tokens"); ot.Exists() {
-			outputTokens = int(ot.Int())
-		}
-
-		if ct := usage.Get("cache_read_input_tokens"); ct.Exists() {
-			cachedTokens = int(ct.Int())
-		}
-	}
-
-	// use llama-server's timing data for tok/sec and duration as it is more accurate
 	if timings.Exists() {
-		inputTokens = int(timings.Get("prompt_n").Int())
-		outputTokens = int(timings.Get("predicted_n").Int())
+		inputTokens = timings.Get("prompt_n").Int()
+		outputTokens = timings.Get("predicted_n").Int()
 		promptPerSecond = timings.Get("prompt_per_second").Float()
 		tokensPerSecond = timings.Get("predicted_per_second").Float()
-		durationMs = int(timings.Get("prompt_ms").Float() + timings.Get("predicted_ms").Float())
-
+		timingsDurationMs := int(timings.Get("prompt_ms").Float() + timings.Get("predicted_ms").Float())
+		if timingsDurationMs > durationMs {
+			durationMs = timingsDurationMs
+		}
 		if cachedValue := timings.Get("cache_n"); cachedValue.Exists() {
-			cachedTokens = int(cachedValue.Int())
+			cachedTokens = cachedValue.Int()
 		}
 	}
 
-	// Calculate TokensPerSecond from usage data when backend doesn't provide it
-	// This is useful for backends like vLLM that return token counts but not performance metrics
-	// Note: Calculated speeds include network latency and are less accurate than backend-provided timings
-	if tokensPerSecond == -1.0 && outputTokens > 0 && durationMs > 0 {
-		tokensPerSecond = float64(outputTokens) / (float64(durationMs) / 1000.0)
+	return ActivityLogEntry{
+		Timestamp: time.Now(),
+		Model:     modelID,
+		Tokens: TokenMetrics{
+			CachedTokens:    int(cachedTokens),
+			InputTokens:     int(inputTokens),
+			OutputTokens:    int(outputTokens),
+			PromptPerSecond: promptPerSecond,
+			TokensPerSecond: tokensPerSecond,
+		},
+		DurationMs: durationMs,
 	}
-
-	return TokenMetrics{
-		Timestamp:       time.Now(),
-		Model:           modelID,
-		CachedTokens:    cachedTokens,
-		InputTokens:     inputTokens,
-		OutputTokens:    outputTokens,
-		PromptPerSecond: promptPerSecond,
-		TokensPerSecond: tokensPerSecond,
-		DurationMs:      durationMs,
-	}, nil
 }
 
 // decompressBody decompresses the body based on Content-Encoding header
@@ -466,16 +630,11 @@ func newBodyCopier(w gin.ResponseWriter, requestTime time.Time) *responseBodyCop
 		ResponseWriter: w,
 		body:           bodyBuffer,
 		tee:            io.MultiWriter(w, bodyBuffer),
-		requestTime:    requestTime,
+		start:          time.Now(),
 	}
 }
 
 func (w *responseBodyCopier) Write(b []byte) (int, error) {
-	if w.start.IsZero() {
-		w.start = time.Now()
-	}
-
-	// Single write operation that writes to both the response and buffer
 	return w.tee.Write(b)
 }
 
@@ -524,9 +683,9 @@ func filterAcceptEncoding(acceptEncoding string) string {
 	supported := map[string]bool{"gzip": true, "deflate": true}
 	var filtered []string
 
-	for _, part := range strings.Split(acceptEncoding, ",") {
+	for part := range strings.SplitSeq(acceptEncoding, ",") {
 		// Parse encoding and optional quality value (e.g., "gzip;q=1.0")
-		encoding := strings.TrimSpace(strings.Split(part, ";")[0])
+		encoding, _, _ := strings.Cut(strings.TrimSpace(part), ";")
 		if supported[strings.ToLower(encoding)] {
 			filtered = append(filtered, strings.TrimSpace(part))
 		}

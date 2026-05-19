@@ -1,59 +1,6 @@
-# Project: llmsnap
-
-## Project Description:
-
-llmsnap is a light weight, transparent proxy server that provides automatic model swapping to vllm, llama.cpp and other OpenAI compatible servers.
-
-## Architecture
-
-See [codemaps/](codemaps/) for detailed architecture documentation:
-- [architecture.md](codemaps/architecture.md) - Overall system architecture
-- [backend.md](codemaps/backend.md) - Go backend structure
-- [frontend.md](codemaps/frontend.md) - Svelte frontend structure
-- [data.md](codemaps/data.md) - Data models and schemas
-
-## Tech stack
-
-- golang
-- typescript, vite and svelte for UI (located in ui-svelte/)
-
-## Workflow Tasks
-
-- when summarizing changes only include details that require further action
-- just say "Done." when there is no further action
-- use `gh` to create PRs and load issues
-- do include Co-Authored-By or created by when committing changes or creating PRs
-- keep PR descriptions short and focused on changes.
-  - never include a test plan
-
-## Testing
-
-- Follow test naming conventions like `TestProxyManager_<test name>`, `TestProcessGroup_<test name>`, etc.
-- Use `go test -v -run <name pattern for new tests>` to run any new tests you've written.
-- Use `make test-dev` after running new tests for a quick over all test run. This runs `go test` and `staticcheck`. Fix any static checking errors. Use this only when changes are made to any code under the `proxy/` directory
-- Use `make test-all` before completing work. This includes long running concurrency tests.
-
-### Commit message example format:
-
-```
-proxy: add new feature
-
-Add new feature that implements functionality X and Y.
-
-- key change 1
-- key change 2
-- key change 3
-
-fixes #123
-```
-
-## Code Reviews
-
-- use three levels High, Medium, Low severity
-- label each discovered issue with a label like H1, M2, L3 respectively
-- High severity are must fix issues (security, race conditions, critical bugs)
-- Medium severity are recommended improvements (coding style, missing functionality, inconsistencies)
-- Low severity are nice to have changes and nits
-- Include a suggestion with each discovered item
-- Limit your code review to three items with the highest priority first
-- Double check your discovered items and recommended remediations
+"github.com/mostlygeek/llama-swap/event"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/internal/perf"
+	"github.com/mostlygeek/llama-swap/proxy"
+	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/mostlygeek/llama-swap/proxy/configwatcher"

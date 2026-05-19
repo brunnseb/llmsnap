@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,20 +11,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/napmany/llmsnap/proxy/config"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/proxy/config"
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	debugLogger = NewLogMonitorWriter(os.Stdout)
+	debugLogger = logmon.NewWriter(os.Stdout)
 )
 
 func init() {
 	// flip to help with debugging tests
 	if false {
-		debugLogger.SetLogLevel(LevelDebug)
+		debugLogger.SetLogLevel(logmon.LevelDebug)
 	} else {
-		debugLogger.SetLogLevel(LevelError)
+		debugLogger.SetLogLevel(logmon.LevelError)
 	}
 }
 
@@ -117,12 +119,12 @@ func TestProcess_UnloadAfterTTL(t *testing.T) {
 	}
 
 	expectedMessage := "I_sense_imminent_danger"
-	config := getTestSimpleResponderConfig(expectedMessage)
-	assert.Equal(t, 0, config.UnloadAfter)
-	config.UnloadAfter = 3 // seconds
-	assert.Equal(t, 3, config.UnloadAfter)
+	conf := getTestSimpleResponderConfig(expectedMessage)
+	assert.Equal(t, config.MODEL_CONFIG_DEFAULT_TTL, conf.UnloadAfter)
+	conf.UnloadAfter = 3 // seconds
+	assert.Equal(t, 3, conf.UnloadAfter)
 
-	process := NewProcess("ttl_test", 2, config, debugLogger, debugLogger)
+	process := NewProcess("ttl_test", 2, conf, debugLogger, debugLogger)
 	defer process.Stop()
 
 	// this should take 4 seconds
@@ -159,12 +161,12 @@ func TestProcess_LowTTLValue(t *testing.T) {
 		t.Skip("skipping test, edit process_test.go to run it ")
 	}
 
-	config := getTestSimpleResponderConfig("fast_ttl")
-	assert.Equal(t, 0, config.UnloadAfter)
-	config.UnloadAfter = 1 // second
-	assert.Equal(t, 1, config.UnloadAfter)
+	conf := getTestSimpleResponderConfig("fast_ttl")
+	assert.Equal(t, config.MODEL_CONFIG_DEFAULT_TTL, conf.UnloadAfter)
+	conf.UnloadAfter = 1 // second
+	assert.Equal(t, 1, conf.UnloadAfter)
 
-	process := NewProcess("ttl", 2, config, debugLogger, debugLogger)
+	process := NewProcess("ttl", 2, conf, debugLogger, debugLogger)
 	defer process.Stop()
 
 	for i := 0; i < 100; i++ {
@@ -582,130 +584,38 @@ func (w *panicOnWriteResponseWriter) Write(b []byte) (int, error) {
 	return w.ResponseRecorder.Write(b)
 }
 
-// TestProcess_SleepAndWakeBasic tests the basic sleep/wake cycle
-func TestProcess_SleepAndWakeBasic(t *testing.T) {
-	expectedMessage := "sleep_wake_test"
-
-	// Get base config and modify sleep/wake fields (like TestProcess_StopCmd modifies CmdStop)
-	cfg := getTestSimpleResponderConfig(expectedMessage)
-	cfg.SleepMode = config.SleepModeEnable
-	cfg.SleepEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/sleep", Method: "POST", Timeout: 5},
-	}
-	cfg.WakeEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/wake_up", Method: "POST", Timeout: 5},
-	}
-
-	process := NewProcess("sleep-wake-basic", 5, cfg, debugLogger, debugLogger)
-	defer process.Stop()
-
-	// Start the process
-	err := process.start()
-	assert.Nil(t, err)
-	assert.Equal(t, StateReady, process.CurrentState())
-
-	// Put it to sleep
-	process.Sleep()
-	assert.Equal(t, StateAsleep, process.CurrentState())
-
-	// Wake it up
-	err = process.wake()
-	assert.Nil(t, err)
-	assert.Equal(t, StateReady, process.CurrentState())
-}
-
-// TestProcess_MultiStepWakeSequence tests multi-step wake sequences like vLLM level 2
-func TestProcess_MultiStepWakeSequence(t *testing.T) {
-	expectedMessage := "multi_step_wake"
-
-	cfg := getTestSimpleResponderConfig(expectedMessage)
-	cfg.SleepMode = config.SleepModeEnable
-	cfg.SleepEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/sleep?level=2", Method: "POST", Timeout: 5},
-	}
-	cfg.WakeEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/wake_up", Method: "POST", Timeout: 5},
-		{Endpoint: "/collective_rpc", Method: "POST", Body: `{"method": "reload_weights"}`, Timeout: 5},
-		{Endpoint: "/reset_prefix_cache", Method: "POST", Timeout: 5},
+func TestProcess_CustomTimeouts(t *testing.T) {
+	modelConfig := config.ModelConfig{
+		Cmd:           "echo test",
+		Proxy:         "http://localhost:8080",
+		CheckEndpoint: "/health",
+		Timeouts: config.TimeoutsConfig{
+			Connect:        45,
+			ResponseHeader: 120,
+			TLSHandshake:   15,
+			ExpectContinue: 2,
+			IdleConn:       120,
+		},
 	}
 
-	process := NewProcess("multi-step-wake", 5, cfg, debugLogger, debugLogger)
-	defer process.Stop()
+	debugLogger := logmon.NewWriter(io.Discard)
+	process := NewProcess("test-model", 30, modelConfig, debugLogger, debugLogger)
 
-	// Start and sleep the process
-	err := process.start()
-	assert.Nil(t, err)
-	process.Sleep()
-	assert.Equal(t, StateAsleep, process.CurrentState())
+	// Verify the process was created successfully
+	assert.NotNil(t, process)
+	assert.Equal(t, "test-model", process.ID)
+	assert.NotNil(t, process.reverseProxy)
+	assert.NotNil(t, process.reverseProxy.Transport)
 
-	// Wake it up - should execute all three steps successfully
-	err = process.wake()
-	assert.Nil(t, err)
-	assert.Equal(t, StateReady, process.CurrentState())
-}
+	// Verify it's using http.Transport (not some other type)
+	transport, ok := process.reverseProxy.Transport.(*http.Transport)
+	assert.True(t, ok, "Transport should be *http.Transport")
+	assert.NotNil(t, transport)
 
-// TestProcess_SleepInsteadOfStopWithSwap tests that sleep is used instead of Stop when swapping models
-func TestProcess_SleepInsteadOfStopWithSwap(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping sleep/wake swap test")
-	}
-
-	expectedMessage := "sleep_swap_test"
-
-	cfg := getTestSimpleResponderConfig(expectedMessage)
-	cfg.SleepMode = config.SleepModeEnable
-	cfg.SleepEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/sleep", Method: "POST", Timeout: 5},
-	}
-	cfg.WakeEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/wake_up", Method: "POST", Timeout: 5},
-	}
-
-	process := NewProcess("sleep-swap", 5, cfg, debugLogger, debugLogger)
-	defer process.Stop()
-
-	// Start the process
-	err := process.start()
-	assert.Nil(t, err)
-	assert.Equal(t, StateReady, process.CurrentState())
-
-	// Call MakeIdle which should use Sleep instead of Stop
-	process.MakeIdle()
-
-	// Process should be asleep, not stopped
-	assert.Equal(t, StateAsleep, process.CurrentState(), "Process should be asleep")
-}
-
-// TestProcess_WakeFailureFallsBackToStart tests that wake failures trigger a full restart
-func TestProcess_WakeFailureFallsBackToStart(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping wake failure test")
-	}
-
-	expectedMessage := "wake_failure_test"
-
-	cfg := getTestSimpleResponderConfig(expectedMessage)
-	cfg.SleepMode = config.SleepModeEnable
-	cfg.SleepEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/sleep", Method: "POST", Timeout: 5},
-	}
-	cfg.WakeEndpoints = []config.HTTPEndpoint{
-		{Endpoint: "/wake_up_fail", Method: "POST", Timeout: 5}, // Use failing endpoint
-	}
-
-	process := NewProcess("wake-failure", 5, cfg, debugLogger, debugLogger)
-	defer process.Stop()
-
-	// Start and sleep the process
-	err := process.start()
-	assert.Nil(t, err)
-	process.Sleep()
-	assert.Equal(t, StateAsleep, process.CurrentState())
-
-	// Try to wake - should fall back to start()
-	err = process.wake()
-	assert.Nil(t, err)
-
-	// Process should be ready
-	assert.Equal(t, StateReady, process.CurrentState())
+	// Verify the timeouts are correctly applied
+	assert.Equal(t, 120*time.Second, transport.ResponseHeaderTimeout)
+	assert.Equal(t, 15*time.Second, transport.TLSHandshakeTimeout)
+	assert.Equal(t, 2*time.Second, transport.ExpectContinueTimeout)
+	assert.Equal(t, 120*time.Second, transport.IdleConnTimeout)
+	assert.True(t, transport.ForceAttemptHTTP2)
 }

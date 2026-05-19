@@ -4,11 +4,15 @@ on:
   pull_request:
     paths:
       - "config-schema.json"
+      - "config.example.yaml"
+      - ".github/workflows/config-schema.yml"
   push:
     branches:
       - main
     paths:
       - "config-schema.json"
+      - "config.example.yaml"
+      - ".github/workflows/config-schema.yml"
 
   workflow_dispatch:
 
@@ -17,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # 6.0.2
 
       - name: Validate JSON Schema
         run: |
@@ -39,3 +43,14 @@ jobs:
           fi
 
           echo "✓ config-schema.json is valid"
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+        with:
+          python-version: "3.x"
+
+      - name: Install check-jsonschema
+        run: pip install check-jsonschema
+
+      - name: Validate config.example.yaml against schema
+        run: check-jsonschema --schemafile config-schema.json config.example.yaml

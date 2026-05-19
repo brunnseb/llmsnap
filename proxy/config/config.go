@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/billziss-gh/golib/shlex"
 	"gopkg.in/yaml.v3"
@@ -117,18 +118,24 @@ type HookOnStartup struct {
 }
 
 type Config struct {
-	HealthCheckTimeout  int                    `yaml:"healthCheckTimeout"`
-	SleepRequestTimeout int                    `yaml:"sleepRequestTimeout"`
-	WakeRequestTimeout  int                    `yaml:"wakeRequestTimeout"`
-	LogRequests         bool                   `yaml:"logRequests"`
-	LogLevel            string                 `yaml:"logLevel"`
-	LogTimeFormat       string                 `yaml:"logTimeFormat"`
-	LogToStdout         string                 `yaml:"logToStdout"`
-	MetricsMaxInMemory  int                    `yaml:"metricsMaxInMemory"`
-	CaptureBuffer       int                    `yaml:"captureBuffer"`
-	Models              map[string]ModelConfig `yaml:"models"` /* key is model ID */
-	Profiles            map[string][]string    `yaml:"profiles"`
-	Groups              map[string]GroupConfig `yaml:"groups"` /* key is group ID */
+	HealthCheckTimeout int                    `yaml:"healthCheckTimeout"`
+	LogRequests        bool                   `yaml:"logRequests"`
+	LogLevel           string                 `yaml:"logLevel"`
+	LogTimeFormat      string                 `yaml:"logTimeFormat"`
+	LogToStdout        string                 `yaml:"logToStdout"`
+	MetricsMaxInMemory int                    `yaml:"metricsMaxInMemory"`
+	CaptureBuffer      int                    `yaml:"captureBuffer"`
+	Performance        PerformanceConfig      `yaml:"performance"`
+	GlobalTTL          int                    `yaml:"globalTTL"`
+	Models             map[string]ModelConfig `yaml:"models"` /* key is model ID */
+	Profiles           map[string][]string    `yaml:"profiles"`
+	Groups             map[string]GroupConfig `yaml:"groups"` /* key is group ID */
+
+	// swap matrix: solver-based alternative to groups
+	Matrix *MatrixConfig `yaml:"matrix"`
+
+	// populated during validation when matrix is configured
+	ExpandedSets []ExpandedSet `yaml:"-"`
 
 	// for key/value replacements in model's cmd, cmdStop, proxy, checkEndPoint
 	Macros MacroList `yaml:"macros"`
@@ -198,15 +205,14 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 
 	// Unmarshal into full Config with defaults
 	config := Config{
-		HealthCheckTimeout:  120,
-		SleepRequestTimeout: 10,
-		WakeRequestTimeout:  10,
-		StartPort:           5800,
-		LogLevel:            "info",
-		LogTimeFormat:       "",
-		LogToStdout:         LogToStdoutProxy,
-		MetricsMaxInMemory:  1000,
-		CaptureBuffer:       5,
+		HealthCheckTimeout: 120,
+		StartPort:          5800,
+		LogLevel:           "info",
+		LogTimeFormat:      "",
+		LogToStdout:        LogToStdoutProxy,
+		MetricsMaxInMemory: 1000,
+		CaptureBuffer:      5,
+		GlobalTTL:          0,
 	}
 	if err = yaml.Unmarshal([]byte(yamlStr), &config); err != nil {
 		return Config{}, err
@@ -216,18 +222,20 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		config.HealthCheckTimeout = 15
 	}
 
-	if config.SleepRequestTimeout < 1 {
-		// set a minimum of 1 second
-		config.SleepRequestTimeout = 1
+	// Apply defaults for performance config when section is missing
+	if config.Performance.Every == 0 {
+		config.Performance.Every = 5 * time.Second
 	}
-
-	if config.WakeRequestTimeout < 1 {
-		// set a minimum of 1 second
-		config.WakeRequestTimeout = 1
+	if err = config.Performance.Validate(); err != nil {
+		return Config{}, fmt.Errorf("performance: %w", err)
 	}
 
 	if config.StartPort < 1 {
 		return Config{}, fmt.Errorf("startPort must be greater than 1")
+	}
+
+	if config.GlobalTTL < 0 {
+		return Config{}, fmt.Errorf("globalTTL must be >= 0")
 	}
 
 	switch config.LogToStdout {
@@ -269,6 +277,15 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		modelConfig.Cmd = StripComments(modelConfig.Cmd)
 		modelConfig.CmdStop = StripComments(modelConfig.CmdStop)
 
+		// set model TTL to globalTTL it is the default value
+		if modelConfig.UnloadAfter == MODEL_CONFIG_DEFAULT_TTL {
+			modelConfig.UnloadAfter = config.GlobalTTL
+		}
+
+		if modelConfig.UnloadAfter < 0 {
+			return Config{}, fmt.Errorf("model %s: invalid TTL value %d", modelId, modelConfig.UnloadAfter)
+		}
+
 		// Validate model macros
 		for _, macro := range modelConfig.Macros {
 			if err = validateMacro(macro.Name, macro.Value); err != nil {
@@ -307,6 +324,26 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			modelConfig.Proxy = strings.ReplaceAll(modelConfig.Proxy, macroSlug, macroStr)
 			modelConfig.CheckEndpoint = strings.ReplaceAll(modelConfig.CheckEndpoint, macroSlug, macroStr)
 			modelConfig.Filters.StripParams = strings.ReplaceAll(modelConfig.Filters.StripParams, macroSlug, macroStr)
+			modelConfig.Name = strings.ReplaceAll(modelConfig.Name, macroSlug, macroStr)
+			modelConfig.Description = strings.ReplaceAll(modelConfig.Description, macroSlug, macroStr)
+
+			// Substitute macros in SetParamsByID keys and values
+			if len(modelConfig.Filters.SetParamsByID) > 0 {
+				newSetParamsByID := make(map[string]map[string]any, len(modelConfig.Filters.SetParamsByID))
+				for key, paramMap := range modelConfig.Filters.SetParamsByID {
+					newKey := strings.ReplaceAll(key, macroSlug, macroStr)
+					newValAny, err := substituteMacroInValue(any(paramMap), entry.Name, entry.Value)
+					if err != nil {
+						return Config{}, fmt.Errorf("model %s filters.setParamsByID: %s", modelId, err.Error())
+					}
+					newParamMap, ok := newValAny.(map[string]any)
+					if !ok {
+						return Config{}, fmt.Errorf("model %s filters.setParamsByID: unexpected type after macro substitution", modelId)
+					}
+					newSetParamsByID[newKey] = newParamMap
+				}
+				modelConfig.Filters.SetParamsByID = newSetParamsByID
+			}
 
 			// Substitute in sleep/wake endpoint arrays
 			for j := range modelConfig.SleepEndpoints {
@@ -342,6 +379,8 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			modelConfig.Cmd = strings.ReplaceAll(modelConfig.Cmd, macroSlug, macroStr)
 			modelConfig.CmdStop = strings.ReplaceAll(modelConfig.CmdStop, macroSlug, macroStr)
 			modelConfig.Proxy = strings.ReplaceAll(modelConfig.Proxy, macroSlug, macroStr)
+			modelConfig.Name = strings.ReplaceAll(modelConfig.Name, macroSlug, macroStr)
+			modelConfig.Description = strings.ReplaceAll(modelConfig.Description, macroSlug, macroStr)
 
 			// Substitute PORT in sleep/wake endpoint arrays
 			for j := range modelConfig.SleepEndpoints {
@@ -371,6 +410,8 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			"proxy":               modelConfig.Proxy,
 			"checkEndpoint":       modelConfig.CheckEndpoint,
 			"filters.stripParams": modelConfig.Filters.StripParams,
+			"name":                modelConfig.Name,
+			"description":         modelConfig.Description,
 		}
 
 		for fieldName, fieldValue := range fieldMap {
@@ -401,6 +442,34 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 			}
 		}
 
+		// Validate SetParamsByID keys and values
+		for key, paramMap := range modelConfig.Filters.SetParamsByID {
+			if matches := macroPatternRegex.FindAllStringSubmatch(key, -1); len(matches) > 0 {
+				return Config{}, fmt.Errorf("unknown macro '${%s}' found in model %s filters.setParamsByID key", matches[0][1], modelId)
+			}
+			if err := validateNestedForUnknownMacros(any(paramMap), fmt.Sprintf("model %s filters.setParamsByID[%s]", modelId, key)); err != nil {
+				return Config{}, err
+			}
+		}
+
+		// Auto-register setParamsByID keys as aliases (skip the model's own ID)
+		for key := range modelConfig.Filters.SetParamsByID {
+			if key == modelId {
+				continue
+			}
+			if _, exists := config.Models[key]; exists {
+				return Config{}, fmt.Errorf("model %s filters.setParamsByID: key '%s' conflicts with an existing model ID", modelId, key)
+			}
+			if existingModel, exists := config.aliases[key]; exists {
+				if existingModel != modelId {
+					return Config{}, fmt.Errorf("duplicate alias '%s' in model %s filters.setParamsByID, already used by model %s", key, modelId, existingModel)
+				}
+				continue // already registered as explicit alias for this model
+			}
+			config.aliases[key] = modelId
+			modelConfig.Aliases = append(modelConfig.Aliases, key)
+		}
+
 		if _, err := url.Parse(modelConfig.Proxy); err != nil {
 			return Config{}, fmt.Errorf("model %s: invalid proxy URL: %w", modelId, err)
 		}
@@ -426,22 +495,35 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		config.Models[modelId] = modelConfig
 	}
 
-	config = AddDefaultGroupToConfig(config)
+	// groups XOR matrix
+	if config.Matrix != nil && len(config.Groups) > 0 {
+		return Config{}, fmt.Errorf("config cannot use both 'groups' and 'matrix'")
+	}
 
-	// Validate group members
-	memberUsage := make(map[string]string)
-	for groupID, groupConfig := range config.Groups {
-		prevSet := make(map[string]bool)
-		for _, member := range groupConfig.Members {
-			if _, found := prevSet[member]; found {
-				return Config{}, fmt.Errorf("duplicate model member %s found in group: %s", member, groupID)
-			}
-			prevSet[member] = true
+	if config.Matrix != nil {
+		expandedSets, err := ValidateMatrix(*config.Matrix, config.Models)
+		if err != nil {
+			return Config{}, fmt.Errorf("matrix: %w", err)
+		}
+		config.ExpandedSets = expandedSets
+	} else {
+		config = AddDefaultGroupToConfig(config)
 
-			if existingGroup, exists := memberUsage[member]; exists {
-				return Config{}, fmt.Errorf("model member %s is used in multiple groups: %s and %s", member, existingGroup, groupID)
+		// Validate group members
+		memberUsage := make(map[string]string)
+		for groupID, groupConfig := range config.Groups {
+			prevSet := make(map[string]bool)
+			for _, member := range groupConfig.Members {
+				if _, found := prevSet[member]; found {
+					return Config{}, fmt.Errorf("duplicate model member %s found in group: %s", member, groupID)
+				}
+				prevSet[member] = true
+
+				if existingGroup, exists := memberUsage[member]; exists {
+					return Config{}, fmt.Errorf("model member %s is used in multiple groups: %s and %s", member, existingGroup, groupID)
+				}
+				memberUsage[member] = groupID
 			}
-			memberUsage[member] = groupID
 		}
 	}
 
@@ -615,9 +697,6 @@ func validateMacro(name string, value any) error {
 	// Validate that value is a scalar type
 	switch v := value.(type) {
 	case string:
-		if len(v) >= 1024 {
-			return fmt.Errorf("macro value for '%s' exceeds maximum length of 1024 characters", name)
-		}
 		// Check for self-reference
 		macroSlug := fmt.Sprintf("${%s}", name)
 		if strings.Contains(v, macroSlug) {

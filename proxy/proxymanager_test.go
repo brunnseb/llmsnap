@@ -45,16 +45,17 @@ func CreateTestResponseRecorder() *TestResponseRecorder {
 }
 
 func TestProxyManager_SwapProcessCorrectly(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-			"model2": getTestSimpleResponderConfig("model2"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	for _, modelName := range []string{"model1", "model2"} {
@@ -68,28 +69,28 @@ func TestProxyManager_SwapProcessCorrectly(t *testing.T) {
 	}
 }
 func TestProxyManager_SwapMultiProcess(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-			"model2": getTestSimpleResponderConfig("model2"),
-		},
-		LogLevel: "error",
-		Groups: map[string]config.GroupConfig{
-			"G1": {
-				Swap:      true,
-				Exclusive: false,
-				Members:   []string{"model1"},
-			},
-			"G2": {
-				Swap:      true,
-				Exclusive: false,
-				Members:   []string{"model2"},
-			},
-		},
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+groups:
+  G1:
+    swap: true
+    exclusive: false
+    members:
+      - model1
+  G2:
+    swap: true
+    exclusive: false
+    members:
+      - model2
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	tests := []string{"model1", "model2"}
@@ -113,25 +114,24 @@ func TestProxyManager_SwapMultiProcess(t *testing.T) {
 // Test that a persistent group is not affected by the swapping behaviour of
 // other groups.
 func TestProxyManager_PersistentGroupsAreNotSwapped(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"), // goes into the default group
-			"model2": getTestSimpleResponderConfig("model2"),
-		},
-		LogLevel: "error",
-		Groups: map[string]config.GroupConfig{
-			// the forever group is persistent and should not be affected by model1
-			"forever": {
-				Swap:       true,
-				Exclusive:  false,
-				Persistent: true,
-				Members:    []string{"model2"},
-			},
-		},
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+groups:
+  forever:
+    swap: true
+    exclusive: false
+    persistent: true
+    members:
+      - model2
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	// make requests to load all models, loading model1 should not affect model2
@@ -216,17 +216,19 @@ func TestProxyManager_SwapMultiProcessParallelRequests(t *testing.T) {
 		t.Skip("skipping slow test")
 	}
 
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-			"model2": getTestSimpleResponderConfig("model2"),
-			"model3": getTestSimpleResponderConfig("model3"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+  model3:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model3
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	results := map[string]string{}
@@ -234,7 +236,7 @@ func TestProxyManager_SwapMultiProcessParallelRequests(t *testing.T) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	for key := range config.Models {
+	for key := range cfg.Models {
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
@@ -262,7 +264,7 @@ func TestProxyManager_SwapMultiProcessParallelRequests(t *testing.T) {
 	}
 
 	wg.Wait()
-	assert.Len(t, results, len(config.Models))
+	assert.Len(t, results, len(cfg.Models))
 
 	for key, result := range results {
 		assert.Equal(t, key, result)
@@ -271,29 +273,27 @@ func TestProxyManager_SwapMultiProcessParallelRequests(t *testing.T) {
 
 func TestProxyManager_ListModelsHandler(t *testing.T) {
 
-	model1Config := getTestSimpleResponderConfig("model1")
-	model1Config.Name = "Model 1"
-	model1Config.Description = "Model 1 description is used for testing"
-
-	model2Config := getTestSimpleResponderConfig("model2")
-	model2Config.Name = "     " // empty whitespace only strings will get ignored
-	model2Config.Description = "  "
-
-	cfg := config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": model1Config,
-			"model2": model2Config,
-			"model3": getTestSimpleResponderConfig("model3"),
-		},
-		Peers: map[string]config.PeerConfig{
-			"peer1": {
-				Proxy:  "http://peer1:8080",
-				Models: []string{"peer-model-a", "peer-model-b"},
-			},
-		},
-		LogLevel: "error",
-	}
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+    name: "Model 1"
+    description: "Model 1 description is used for testing"
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+    name: "     "
+    description: "  "
+  model3:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model3
+peers:
+  peer1:
+    proxy: http://peer1:8080
+    models:
+      - peer-model-a
+      - peer-model-b
+`)
 
 	proxy := New(cfg)
 
@@ -471,22 +471,22 @@ models:
 
 func TestProxyManager_ListModelsHandler_SortedByID(t *testing.T) {
 	// Intentionally add models in non-sorted order and with an unlisted model
-	config := config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"zeta":  getTestSimpleResponderConfig("zeta"),
-			"alpha": getTestSimpleResponderConfig("alpha"),
-			"beta":  getTestSimpleResponderConfig("beta"),
-			"hidden": func() config.ModelConfig {
-				mc := getTestSimpleResponderConfig("hidden")
-				mc.Unlisted = true
-				return mc
-			}(),
-		},
-		LogLevel: "error",
-	}
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  zeta:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond zeta
+  alpha:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond alpha
+  beta:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond beta
+  hidden:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond hidden
+    unlisted: true
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 
 	// Request models list
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -516,21 +516,19 @@ func TestProxyManager_ListModelsHandler_SortedByID(t *testing.T) {
 
 func TestProxyManager_ListModelsHandler_IncludeAliasesInList(t *testing.T) {
 	// Configure alias
-	config := config.Config{
-		HealthCheckTimeout:   15,
-		IncludeAliasesInList: true,
-		Models: map[string]config.ModelConfig{
-			"model1": func() config.ModelConfig {
-				mc := getTestSimpleResponderConfig("model1")
-				mc.Name = "Model 1"
-				mc.Aliases = []string{"alias1"}
-				return mc
-			}(),
-		},
-		LogLevel: "error",
-	}
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+includeAliasesInList: true
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+    name: "Model 1"
+    aliases:
+      - alias1
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 
 	// Request models list
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -593,7 +591,7 @@ func TestProxyManager_Shutdown(t *testing.T) {
 	model3Config := getTestSimpleResponderConfigPort("model3", 9993)
 	model3Config.Proxy = "http://localhost:10003/"
 
-	config := config.AddDefaultGroupToConfig(config.Config{
+	cfg := config.AddDefaultGroupToConfig(config.Config{
 		HealthCheckTimeout: 15,
 		Models: map[string]config.ModelConfig{
 			"model1": model1Config,
@@ -609,7 +607,7 @@ func TestProxyManager_Shutdown(t *testing.T) {
 		},
 	})
 
-	proxy := New(config)
+	proxy := New(cfg)
 
 	// Start all the processes
 	var wg sync.WaitGroup
@@ -636,13 +634,13 @@ func TestProxyManager_Shutdown(t *testing.T) {
 }
 
 func TestProxyManager_Unload(t *testing.T) {
-	conf := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	conf := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	proxy := New(conf)
 	reqBody := fmt.Sprintf(`{"model":"%s"}`, "model1")
@@ -668,22 +666,23 @@ func TestProxyManager_Unload(t *testing.T) {
 
 func TestProxyManager_UnloadSingleModel(t *testing.T) {
 	const testGroupId = "testGroup"
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-			"model2": getTestSimpleResponderConfig("model2"),
-		},
-		Groups: map[string]config.GroupConfig{
-			testGroupId: {
-				Swap:    false,
-				Members: []string{"model1", "model2"},
-			},
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+groups:
+  testGroup:
+    swap: false
+    members:
+      - model1
+      - model2
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopImmediately)
 
 	// start both model
@@ -719,14 +718,15 @@ func TestProxyManager_UnloadSingleModel(t *testing.T) {
 // Test issue #61 `Listing the current list of models and the loaded model.`
 func TestProxyManager_RunningEndpoint(t *testing.T) {
 	// Shared configuration
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-			"model2": getTestSimpleResponderConfig("model2"),
-		},
-		LogLevel: "warn",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: warn
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
 
 	// Define a helper struct to parse the JSON response.
 	type RunningResponse struct {
@@ -742,8 +742,9 @@ func TestProxyManager_RunningEndpoint(t *testing.T) {
 	}
 
 	// Create proxy once for all tests
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	t.Run("no models loaded", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/running", nil)
@@ -789,21 +790,22 @@ func TestProxyManager_RunningEndpoint(t *testing.T) {
 		// Verify extended fields are present
 		assert.NotEmpty(t, response.Running[0].Cmd, "cmd should be populated")
 		assert.NotEmpty(t, response.Running[0].Proxy, "proxy should be populated")
-		assert.Equal(t, 0, response.Running[0].TTL, "ttl should default to 0")
+		assert.Equal(t, 0, response.Running[0].TTL, "ttl should default to globalTTL (0)")
 	})
 }
 
 func TestProxyManager_AudioTranscriptionHandler(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"TheExpectedModel": getTestSimpleResponderConfig("TheExpectedModel"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  TheExpectedModel:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond TheExpectedModel
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	// Create a buffer with multipart form data
 	var b bytes.Buffer
@@ -844,19 +846,19 @@ func TestProxyManager_AudioTranscriptionHandler(t *testing.T) {
 // Test useModelName in configuration sends overrides what is sent to upstream
 func TestProxyManager_UseModelName(t *testing.T) {
 	upstreamModelName := "upstreamModel"
-	modelConfig := getTestSimpleResponderConfig(upstreamModelName)
-	modelConfig.UseModelName = upstreamModelName
 
-	conf := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": modelConfig,
-		},
-		LogLevel: "error",
-	})
+	conf := testConfigFromYAML(t, fmt.Sprintf(`
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond %s
+    useModelName: %s
+`, upstreamModelName, upstreamModelName))
 
 	proxy := New(conf)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	requestedModel := "model1"
 
@@ -910,16 +912,17 @@ func TestProxyManager_UseModelName(t *testing.T) {
 }
 
 func TestProxyManager_AudioVoicesGETHandler(t *testing.T) {
-	conf := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	conf := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	proxy := New(conf)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	t.Run("successful GET with model query param", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/audio/voices?model=model1", nil)
@@ -947,13 +950,13 @@ func TestProxyManager_AudioVoicesGETHandler(t *testing.T) {
 }
 
 func TestProxyManager_CORSOptionsHandler(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	tests := []struct {
 		name            string
@@ -994,8 +997,9 @@ func TestProxyManager_CORSOptionsHandler(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			proxy := New(config)
+			proxy := New(cfg)
 			defer proxy.StopProcesses(StopWaitForInflightRequest)
+			injectTestHandlers(proxy, nil)
 
 			req := httptest.NewRequest(tt.method, "/v1/chat/completions", nil)
 			for k, v := range tt.requestHeaders {
@@ -1015,19 +1019,17 @@ func TestProxyManager_CORSOptionsHandler(t *testing.T) {
 }
 
 func TestProxyManager_Upstream(t *testing.T) {
-	configStr := fmt.Sprintf(`
+	cfg := testConfigFromYAML(t, `
 logLevel: error
 models:
   model1:
-    cmd: %s -port ${PORT} -silent -respond model1
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
     aliases: [model-alias]
-`, getSimpleResponderPath())
+`)
 
-	config, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-	assert.NoError(t, err)
-
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 	t.Run("main model name", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/upstream/model1/test", nil)
 		rec := CreateTestResponseRecorder()
@@ -1046,16 +1048,17 @@ models:
 }
 
 func TestProxyManager_ChatContentLength(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	reqBody := fmt.Sprintf(`{"model":"%s", "x": "this is just some content to push the length out a bit"}`, "model1")
 	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1070,23 +1073,19 @@ func TestProxyManager_ChatContentLength(t *testing.T) {
 }
 
 func TestProxyManager_FiltersStripParams(t *testing.T) {
-	modelConfig := getTestSimpleResponderConfig("model1")
-	modelConfig.Filters = config.ModelFilters{
-		Filters: config.Filters{
-			StripParams: "temperature, model, stream",
-		},
-	}
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+    filters:
+      stripParams: "temperature, model, stream"
+`)
 
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		LogLevel:           "error",
-		Models: map[string]config.ModelConfig{
-			"model1": modelConfig,
-		},
-	})
-
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 	reqBody := `{"model":"model1", "temperature":0.1, "x_param":"123", "y_param":"abc", "stream":true}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
 	w := CreateTestResponseRecorder()
@@ -1105,16 +1104,67 @@ func TestProxyManager_FiltersStripParams(t *testing.T) {
 	// t.Logf("%v", response)
 }
 
-func TestProxyManager_HealthEndpoint(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+func TestProxyManager_FiltersSetParamsByID(t *testing.T) {
+	// no explicit aliases — setParamsByID keys are auto-registered as aliases
+	cfg := testConfigFromYAML(t, `
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+    proxy: "http://127.0.0.1:${PORT}"
+    filters:
+      setParams:
+        reasoning_effort: medium
+      setParamsByID:
+        "${MODEL_ID}:high":
+          reasoning_effort: high
+        "${MODEL_ID}:low":
+          reasoning_effort: low
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
+
+	tests := []struct {
+		requestedModel string
+		wantEffort     string
+	}{
+		// setParams applies, no setParamsByID match
+		{requestedModel: "model1", wantEffort: "medium"},
+		// setParamsByID overrides setParams
+		{requestedModel: "model1:high", wantEffort: "high"},
+		{requestedModel: "model1:low", wantEffort: "low"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.requestedModel, func(t *testing.T) {
+			reqBody := fmt.Sprintf(`{"model":%q}`, tt.requestedModel)
+			req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+			w := CreateTestResponseRecorder()
+			proxy.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var response map[string]interface{}
+			assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+
+			requestBody, _ := response["request_body"].(string)
+			gotEffort := gjson.Get(requestBody, "reasoning_effort").String()
+			assert.Equal(t, tt.wantEffort, gotEffort, "reasoning_effort mismatch for model %s", tt.requestedModel)
+		})
+	}
+}
+
+func TestProxyManager_HealthEndpoint(t *testing.T) {
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
+
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := CreateTestResponseRecorder()
@@ -1125,16 +1175,17 @@ func TestProxyManager_HealthEndpoint(t *testing.T) {
 
 // Ensure the custom llama-server /completion endpoint proxies correctly
 func TestProxyManager_CompletionEndpoint(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
 
 	reqBody := `{"model":"model1"}`
 	req := httptest.NewRequest("POST", "/completion", bytes.NewBufferString(reqBody))
@@ -1147,10 +1198,7 @@ func TestProxyManager_CompletionEndpoint(t *testing.T) {
 
 func TestProxyManager_StartupHooks(t *testing.T) {
 
-	// using real YAML as the configuration has gotten more complex
-	// is the right approach as LoadConfigFromReader() does a lot more
-	// than parse YAML now. Eventually migrate all tests to use this approach
-	configStr := strings.Replace(`
+	cfg := testConfigFromYAML(t, `
 logLevel: error
 hooks:
   on_startup:
@@ -1165,16 +1213,10 @@ groups:
        - model2
 models:
   model1:
-    cmd: ${simpleresponderpath} --port ${PORT} --silent --respond model1
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
   model2:
-      cmd: ${simpleresponderpath} --port ${PORT} --silent --respond model2
-`, "${simpleresponderpath}", simpleResponderPath, -1)
-
-	// Create a test model configuration
-	config, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-	if !assert.NoError(t, err, "Invalid configuration") {
-		return
-	}
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+`)
 
 	preloadChan := make(chan ModelPreloadedEvent, 2) // buffer for 2 expected events
 
@@ -1185,7 +1227,7 @@ models:
 	defer unsub()
 
 	// Create the proxy which should trigger preloading
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	for i := 0; i < 2; i++ {
@@ -1205,16 +1247,17 @@ models:
 }
 
 func TestProxyManager_StreamingEndpointsReturnNoBufferingHeader(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1":       getTestSimpleResponderConfig("model1"),
-			"author/model": getTestSimpleResponderConfig("author/model"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+  author/model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond author/model
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	endpoints := []string{
@@ -1256,15 +1299,15 @@ func TestProxyManager_StreamingEndpointsReturnNoBufferingHeader(t *testing.T) {
 }
 
 func TestProxyManager_ProxiedStreamingEndpointReturnsNoBufferingHeader(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"streaming-model": getTestSimpleResponderConfig("streaming-model"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  streaming-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond streaming-model
+`)
 
-	proxy := New(config)
+	proxy := New(cfg)
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
 	// Make a streaming request
@@ -1281,13 +1324,13 @@ func TestProxyManager_ProxiedStreamingEndpointReturnsNoBufferingHeader(t *testin
 }
 
 func TestProxyManager_ApiGetVersion(t *testing.T) {
-	config := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	// Version test map
 	versionTest := map[string]string{
@@ -1296,7 +1339,7 @@ func TestProxyManager_ApiGetVersion(t *testing.T) {
 		"version":    "v001",
 	}
 
-	proxy := New(config)
+	proxy := New(cfg)
 	proxy.SetVersion(versionTest["build_date"], versionTest["commit"], versionTest["version"])
 	defer proxy.StopProcesses(StopWaitForInflightRequest)
 
@@ -1319,17 +1362,20 @@ func TestProxyManager_ApiGetVersion(t *testing.T) {
 }
 
 func TestProxyManager_APIKeyAuth(t *testing.T) {
-	testConfig := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		RequiredAPIKeys: []string{"valid-key-1", "valid-key-2"},
-		LogLevel:        "error",
-	})
+	testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+apiKeys:
+  - valid-key-1
+  - valid-key-2
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	proxy := New(testConfig)
 	defer proxy.StopProcesses(StopImmediately)
+	injectTestHandlers(proxy, nil)
 
 	t.Run("valid key in x-api-key header", func(t *testing.T) {
 		reqBody := `{"model":"model1"}`
@@ -1431,16 +1477,17 @@ func TestProxyManager_APIKeyAuth(t *testing.T) {
 
 func TestProxyManager_APIKeyAuth_Disabled(t *testing.T) {
 	// Config without RequiredAPIKeys - auth should be disabled
-	testConfig := config.AddDefaultGroupToConfig(config.Config{
-		HealthCheckTimeout: 15,
-		Models: map[string]config.ModelConfig{
-			"model1": getTestSimpleResponderConfig("model1"),
-		},
-		LogLevel: "error",
-	})
+	testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
 
 	proxy := New(testConfig)
 	defer proxy.StopProcesses(StopImmediately)
+	injectTestHandlers(proxy, nil)
 
 	t.Run("requests pass without API key when not configured", func(t *testing.T) {
 		reqBody := `{"model":"model1"}`
@@ -1464,8 +1511,7 @@ func TestProxyManager_PeerProxy_InferenceHandler(t *testing.T) {
 		}))
 		defer peerServer.Close()
 
-		// Create config with peers but no local model for "peer-model"
-		configStr := fmt.Sprintf(`
+		testConfig := testConfigFromYAML(t, fmt.Sprintf(`
 logLevel: error
 peers:
   test-peer:
@@ -1474,14 +1520,12 @@ peers:
       - peer-model
 models:
   local-model:
-    cmd: %s -port ${PORT} -silent -respond local-model
-`, peerServer.URL, getSimpleResponderPath())
-
-		testConfig, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-		assert.NoError(t, err)
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`, peerServer.URL))
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
 
 		reqBody := `{"model":"peer-model"}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1503,8 +1547,7 @@ models:
 		}))
 		defer peerServer.Close()
 
-		// Create config where "shared-model" exists both locally and on peer
-		configStr := fmt.Sprintf(`
+		testConfig := testConfigFromYAML(t, fmt.Sprintf(`
 logLevel: error
 peers:
   test-peer:
@@ -1513,14 +1556,12 @@ peers:
       - shared-model
 models:
   shared-model:
-    cmd: %s -port ${PORT} -silent -respond local-response
-`, peerServer.URL, getSimpleResponderPath())
-
-		testConfig, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-		assert.NoError(t, err)
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-response
+`, peerServer.URL))
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, map[string]string{"shared-model": "local-response"})
 
 		reqBody := `{"model":"shared-model"}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1539,7 +1580,7 @@ models:
 		}))
 		defer peerServer.Close()
 
-		configStr := fmt.Sprintf(`
+		testConfig := testConfigFromYAML(t, fmt.Sprintf(`
 logLevel: error
 peers:
   test-peer:
@@ -1548,14 +1589,12 @@ peers:
       - peer-model
 models:
   local-model:
-    cmd: %s -port ${PORT} -silent -respond local-model
-`, peerServer.URL, getSimpleResponderPath())
-
-		testConfig, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-		assert.NoError(t, err)
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`, peerServer.URL))
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
 
 		reqBody := `{"model":"unknown-model"}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1576,7 +1615,7 @@ models:
 		}))
 		defer peerServer.Close()
 
-		configStr := fmt.Sprintf(`
+		testConfig := testConfigFromYAML(t, fmt.Sprintf(`
 logLevel: error
 peers:
   test-peer:
@@ -1586,14 +1625,12 @@ peers:
       - peer-model
 models:
   local-model:
-    cmd: %s -port ${PORT} -silent -respond local-model
-`, peerServer.URL, getSimpleResponderPath())
-
-		testConfig, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-		assert.NoError(t, err)
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`, peerServer.URL))
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
 
 		reqBody := `{"model":"peer-model"}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1605,16 +1642,17 @@ models:
 	})
 
 	t.Run("no peers configured - unknown model returns error", func(t *testing.T) {
-		testConfig := config.AddDefaultGroupToConfig(config.Config{
-			HealthCheckTimeout: 15,
-			Models: map[string]config.ModelConfig{
-				"local-model": getTestSimpleResponderConfig("local-model"),
-			},
-			LogLevel: "error",
-		})
+		testConfig := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  local-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`)
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
 
 		// peerProxy exists but has no peer models configured
 		assert.False(t, proxy.peerProxy.HasPeerModel("unknown-model"))
@@ -1636,7 +1674,7 @@ models:
 		}))
 		defer peerServer.Close()
 
-		configStr := fmt.Sprintf(`
+		testConfig := testConfigFromYAML(t, fmt.Sprintf(`
 logLevel: error
 peers:
   test-peer:
@@ -1645,14 +1683,12 @@ peers:
       - peer-model
 models:
   local-model:
-    cmd: %s -port ${PORT} -silent -respond local-model
-`, peerServer.URL, getSimpleResponderPath())
-
-		testConfig, err := config.LoadConfigFromReader(strings.NewReader(configStr))
-		assert.NoError(t, err)
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`, peerServer.URL))
 
 		proxy := New(testConfig)
 		defer proxy.StopProcesses(StopImmediately)
+		injectTestHandlers(proxy, nil)
 
 		reqBody := `{"model":"peer-model"}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
@@ -1661,5 +1697,244 @@ models:
 		proxy.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "no", w.Header().Get("X-Accel-Buffering"))
+	})
+}
+
+func TestProxyManager_SdApiTxt2ImgRouting(t *testing.T) {
+	conf := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  sd-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond sd-model
+`)
+
+	proxy := New(conf)
+	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
+
+	t.Run("successful txt2img with model", func(t *testing.T) {
+		reqBody := `{"model":"sd-model","prompt":"a cat"}`
+		req := httptest.NewRequest("POST", "/sdapi/v1/txt2img", bytes.NewBufferString(reqBody))
+		w := CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "sd-model")
+	})
+
+	t.Run("successful img2img with model", func(t *testing.T) {
+		reqBody := `{"model":"sd-model","prompt":"a cat","init_images":[]}`
+		req := httptest.NewRequest("POST", "/sdapi/v1/img2img", bytes.NewBufferString(reqBody))
+		w := CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "sd-model")
+	})
+
+	t.Run("missing model returns 400", func(t *testing.T) {
+		reqBody := `{"prompt":"a cat"}`
+		req := httptest.NewRequest("POST", "/sdapi/v1/txt2img", bytes.NewBufferString(reqBody))
+		w := CreateTestResponseRecorder()
+
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "missing or invalid 'model' key")
+	})
+}
+
+func TestProxyManager_SdApiGetLoras(t *testing.T) {
+	conf := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  sd-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond sd-model
+`)
+
+	proxy := New(conf)
+	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
+
+	t.Run("successful GET loras with model query param", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/sdapi/v1/loras?model=sd-model", nil)
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("missing model query param returns 400", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/sdapi/v1/loras", nil)
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "missing required 'model' query parameter")
+	})
+
+	t.Run("unknown model returns 400", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/sdapi/v1/loras?model=nonexistent", nil)
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "could not find suitable handler")
+	})
+}
+
+func TestProxyManager_AudioTranscriptionCapture(t *testing.T) {
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+captureBuffer: 5
+models:
+  TheExpectedModel:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond TheExpectedModel
+`)
+
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
+
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+
+	fw, err := w.CreateFormField("model")
+	assert.NoError(t, err)
+	_, err = fw.Write([]byte("TheExpectedModel"))
+	assert.NoError(t, err)
+
+	fw, err = w.CreateFormFile("file", "test.mp3")
+	assert.NoError(t, err)
+	_, err = fw.Write([]byte("test audio content"))
+	assert.NoError(t, err)
+	w.Close()
+
+	req := httptest.NewRequest("POST", "/v1/audio/transcriptions", &b)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer mysecret")
+	req.Header.Set("X-Custom-Req", "req-value")
+	rec := CreateTestResponseRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// Verify capture exists
+	metrics := proxy.metricsMonitor.getMetrics()
+	assert.Equal(t, 1, len(metrics))
+	assert.True(t, metrics[0].HasCapture)
+
+	capture := proxy.metricsMonitor.getCaptureByID(metrics[0].ID)
+	assert.NotNil(t, capture)
+
+	// Should capture request headers (sensitive ones redacted)
+	assert.NotEmpty(t, capture.ReqHeaders)
+	assert.Equal(t, "[REDACTED]", capture.ReqHeaders["Authorization"])
+	assert.Equal(t, "req-value", capture.ReqHeaders["X-Custom-Req"])
+
+	// Should capture response headers
+	assert.NotNil(t, capture.RespHeaders)
+
+	// Should NOT capture request bodies but get response bodies (text
+	assert.Nil(t, capture.ReqBody)
+	assert.NotNil(t, capture.RespBody)
+}
+
+func TestProxyManager_VersionlessEndpoints_LocalModel(t *testing.T) {
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+`)
+
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopWaitForInflightRequest)
+	injectTestHandlers(proxy, nil)
+
+	endpoints := []string{
+		"/v/chat/completions",
+		"/v/responses",
+		"/v/completions",
+		"/v/embeddings",
+		"/v/rerank",
+		"/v/reranking",
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint, func(t *testing.T) {
+			reqBody := `{"model":"model1"}`
+			req := httptest.NewRequest("POST", endpoint, bytes.NewBufferString(reqBody))
+			w := CreateTestResponseRecorder()
+			proxy.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), "model1")
+		})
+	}
+
+	t.Run("/v/messages", func(t *testing.T) {
+		reqBody := `{"model":"model1","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest("POST", "/v/messages", bytes.NewBufferString(reqBody))
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "model1")
+	})
+}
+
+func TestProxyManager_VersionlessEndpoints_PeerModel(t *testing.T) {
+	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"endpoint":"%s","model":"peer-model"}`, r.URL.Path)
+	}))
+	defer peerServer.Close()
+
+	cfg := testConfigFromYAML(t, fmt.Sprintf(`
+healthCheckTimeout: 15
+logLevel: error
+peers:
+  test-peer:
+    proxy: %s
+    models:
+      - peer-model
+models:
+  local-model:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond local-model
+`, peerServer.URL))
+
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopImmediately)
+
+	endpoints := []struct {
+		path       string
+		wantSuffix string
+	}{
+		{"/v/chat/completions", "/chat/completions"},
+		{"/v/responses", "/responses"},
+		{"/v/completions", "/completions"},
+		{"/v/embeddings", "/embeddings"},
+		{"/v/rerank", "/rerank"},
+		{"/v/reranking", "/reranking"},
+	}
+
+	for _, ep := range endpoints {
+		t.Run(ep.path, func(t *testing.T) {
+			reqBody := `{"model":"peer-model"}`
+			req := httptest.NewRequest("POST", ep.path, bytes.NewBufferString(reqBody))
+			w := CreateTestResponseRecorder()
+			proxy.ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), ep.wantSuffix)
+		})
+	}
+
+	t.Run("/v/messages", func(t *testing.T) {
+		reqBody := `{"model":"peer-model","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest("POST", "/v/messages", bytes.NewBufferString(reqBody))
+		w := CreateTestResponseRecorder()
+		proxy.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Contains(t, w.Body.String(), "/messages")
 	})
 }

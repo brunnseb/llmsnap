@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/napmany/llmsnap/proxy/config"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
 type peerProxyMember struct {
@@ -24,7 +25,7 @@ type PeerProxy struct {
 	proxyMap map[string]*peerProxyMember
 }
 
-func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*PeerProxy, error) {
+func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *logmon.Monitor) (*PeerProxy, error) {
 	proxyMap := make(map[string]*peerProxyMember)
 
 	// Sort peer IDs for consistent iteration order
@@ -34,23 +35,25 @@ func NewPeerProxy(peers config.PeerDictionaryConfig, proxyLogger *LogMonitor) (*
 	}
 	sort.Strings(peerIDs)
 
-	// Create a shared transport with reasonable timeouts for peer connections
-	// these can be tuned with feedback later
-	peerTransport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second, // Connection timeout
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second, // Time to wait for response headers
-		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-	}
-
 	for _, peerID := range peerIDs {
 		peer := peers[peerID]
+
+		// Create a transport with per-peer timeout configuration
+		peerTransport := &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   time.Duration(peer.Timeouts.Connect) * time.Second,
+				KeepAlive: time.Duration(peer.Timeouts.KeepAlive) * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   time.Duration(peer.Timeouts.TLSHandshake) * time.Second,
+			ResponseHeaderTimeout: time.Duration(peer.Timeouts.ResponseHeader) * time.Second,
+			ExpectContinueTimeout: time.Duration(peer.Timeouts.ExpectContinue) * time.Second,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       time.Duration(peer.Timeouts.IdleConn) * time.Second,
+		}
+
 		// Create reverse proxy for this peer
 		reverseProxy := httputil.NewSingleHostReverseProxy(peer.ProxyURL)
 		reverseProxy.Transport = peerTransport

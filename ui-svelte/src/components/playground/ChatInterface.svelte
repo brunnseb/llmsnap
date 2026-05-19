@@ -1,7 +1,8 @@
 <script lang="ts">
   import { models } from "../../stores/api";
   import { persistentStore } from "../../stores/persistent";
-  import { streamChatCompletion } from "../../lib/chatApi";
+  import { streamChatCompletion, type Endpoint } from "../../lib/chatApi";
+  import { playgroundStores } from "../../stores/playgroundActivity";
   import type { ChatMessage, ContentPart } from "../../lib/types";
   import ChatMessageComponent from "./ChatMessage.svelte";
   import ModelSelector from "./ModelSelector.svelte";
@@ -10,8 +11,19 @@
   const selectedModelStore = persistentStore<string>("playground-selected-model", "");
   const systemPromptStore = persistentStore<string>("playground-system-prompt", "");
   const temperatureStore = persistentStore<number>("playground-temperature", 0.7);
+  const endpointStore = persistentStore<Endpoint>("playground-endpoint", "v1/chat/completions");
+  const maxTokensStore = persistentStore<number>("playground-max-tokens", 4096);
 
-  let messages = $state<ChatMessage[]>([]);
+  function loadMessages(): ChatMessage[] {
+    try {
+      const saved = localStorage.getItem("playground-messages");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  let messages = $state<ChatMessage[]>(loadMessages());
   let userInput = $state("");
   let isStreaming = $state(false);
   let isReasoning = $state(false);
@@ -24,20 +36,51 @@
   let imageError = $state<string | null>(null);
 
   let hasModels = $derived($models.some((m) => !m.unlisted));
+  let userScrolledUp = $state(false);
 
-  // Auto-scroll when messages change
   $effect(() => {
-    if (messages.length > 0 && messagesContainer) {
+    playgroundStores.chatStreaming.set(isStreaming);
+  });
+
+  function handleMessagesScroll() {
+    if (!messagesContainer) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
+    // Consider "at bottom" if within 40px of the bottom
+    userScrolledUp = scrollHeight - scrollTop - clientHeight > 40;
+  }
+
+  // Auto-scroll when messages change — skip if user scrolled up
+  $effect(() => {
+    if (messages.length > 0 && messagesContainer && !userScrolledUp) {
       messagesContainer.scrollTo({
         top: messagesContainer.scrollHeight,
-        behavior: "smooth",
+        behavior: isStreaming ? "instant" : "smooth",
       });
     }
+  });
+
+  // Persist messages to localStorage (throttled to once per 2s)
+  let lastSaveTime = 0;
+  $effect(() => {
+    const json = JSON.stringify(messages);
+    const elapsed = Date.now() - lastSaveTime;
+    const save = () => {
+      try { localStorage.setItem("playground-messages", json); } catch {}
+      lastSaveTime = Date.now();
+    };
+    if (elapsed >= 2000) {
+      save();
+      return;
+    }
+    const timer = setTimeout(save, 2000 - elapsed);
+    return () => clearTimeout(timer);
   });
 
   async function sendMessage() {
     const trimmedInput = userInput.trim();
     if ((!trimmedInput && attachedImages.length === 0) || !$selectedModelStore || isStreaming) return;
+
+    userScrolledUp = false;
 
     // Build message content (multimodal if images attached)
     let content: string | ContentPart[];
@@ -101,7 +144,7 @@
         $selectedModelStore,
         apiMessages,
         abortController.signal,
-        { temperature: $temperatureStore }
+        { temperature: $temperatureStore, endpoint: $endpointStore, max_tokens: $maxTokensStore }
       );
 
       for await (const chunk of stream) {
@@ -279,6 +322,19 @@
   {#if showSettings}
     <div class="shrink-0 mb-4 p-4 bg-surface border border-gray-200 dark:border-white/10 rounded">
       <div class="mb-4">
+        <label class="block text-sm font-medium mb-1" for="endpoint">Endpoint</label>
+        <select
+          id="endpoint"
+          class="w-full px-3 py-2 rounded border border-gray-200 dark:border-white/10 bg-card focus:outline-none focus:ring-2 focus:ring-primary"
+          bind:value={$endpointStore}
+          disabled={isStreaming}
+        >
+          <option value="v1/chat/completions">/v1/chat/completions</option>
+          <option value="v1/messages">/v1/messages</option>
+          <option value="v1/responses">/v1/responses</option>
+        </select>
+      </div>
+      <div class="mb-4">
         <label class="block text-sm font-medium mb-1" for="system-prompt">System Prompt</label>
         <textarea
           id="system-prompt"
@@ -289,7 +345,7 @@
           disabled={isStreaming}
         ></textarea>
       </div>
-      <div>
+      <div class="mb-4">
         <label class="block text-sm font-medium mb-1" for="temperature">
           Temperature: {$temperatureStore.toFixed(2)}
         </label>
@@ -308,6 +364,18 @@
           <span>Creative (2)</span>
         </div>
       </div>
+      <div>
+        <label class="block text-sm font-medium mb-1" for="max-tokens">Max Tokens</label>
+        <input
+          id="max-tokens"
+          type="number"
+          min="1"
+          class="w-full px-3 py-2 rounded border border-gray-200 dark:border-white/10 bg-card focus:outline-none focus:ring-2 focus:ring-primary"
+          bind:value={$maxTokensStore}
+          disabled={isStreaming}
+        />
+        <p class="text-xs text-txtsecondary mt-1">Required for /v1/messages.</p>
+      </div>
     </div>
   {/if}
 
@@ -321,6 +389,7 @@
     <div
       class="flex-1 overflow-y-auto mb-4 px-2"
       bind:this={messagesContainer}
+      onscroll={handleMessagesScroll}
     >
       {#if messages.length === 0}
         <div class="h-full flex items-center justify-center text-txtsecondary">

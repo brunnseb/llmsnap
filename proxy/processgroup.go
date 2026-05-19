@@ -6,7 +6,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/napmany/llmsnap/proxy/config"
+	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/mostlygeek/llama-swap/proxy/config"
 )
 
 type ProcessGroup struct {
@@ -18,15 +19,31 @@ type ProcessGroup struct {
 	exclusive  bool
 	persistent bool
 
-	proxyLogger    *LogMonitor
-	upstreamLogger *LogMonitor
+	proxyLogger    *logmon.Monitor
+	upstreamLogger *logmon.Monitor
 
 	// map of current processes
 	processes       map[string]*Process
 	lastUsedProcess string
+
+	// inflight tracks fast-path requests (requests for the already-selected
+	// model in a swap group). Fast-path requests Add(1) while holding pg.Lock
+	// and Done() on completion; a concurrent swap request calls inflight.Wait()
+	// under pg.Lock before stopping the current process. Without this tracking,
+	// a fast-path request that has released pg.Lock but has not yet called
+	// Process.inFlightRequests.Add(1) races with Stop()'s Wait() and can be
+	// killed mid-request.
+	inflight sync.WaitGroup
+
+	// testDelayFastPath is a test-only hook that, when non-nil, is invoked in
+	// the fast path after pg.Lock is released but before the request is
+	// dispatched to Process.ProxyRequest. Tests use it to park a fast-path
+	// request at the exact race window to deterministically reproduce the
+	// fast-path vs swap race.
+	testDelayFastPath func()
 }
 
-func NewProcessGroup(id string, config config.Config, proxyLogger *LogMonitor, upstreamLogger *LogMonitor) *ProcessGroup {
+func NewProcessGroup(id string, config config.Config, proxyLogger *logmon.Monitor, upstreamLogger *logmon.Monitor) *ProcessGroup {
 	groupConfig, ok := config.Groups[id]
 	if !ok {
 		panic("Unable to find configuration for group id: " + id)
@@ -46,7 +63,7 @@ func NewProcessGroup(id string, config config.Config, proxyLogger *LogMonitor, u
 	// Create a Process for each member in the group
 	for _, modelID := range groupConfig.Members {
 		modelConfig, modelID, _ := pg.config.FindConfig(modelID)
-		processLogger := NewLogMonitorWriter(upstreamLogger)
+		processLogger := logmon.NewWriter(upstreamLogger)
 		process := NewProcess(modelID, pg.config.HealthCheckTimeout, modelConfig, processLogger, pg.proxyLogger)
 		pg.processes[modelID] = process
 	}
@@ -64,6 +81,13 @@ func (pg *ProcessGroup) ProxyRequest(modelID string, writer http.ResponseWriter,
 		pg.Lock()
 		if pg.lastUsedProcess != modelID {
 
+			// Wait for in-flight fast-path requests to drain before stopping
+			// the previous process. Without this, a fast-path request that has
+			// released pg.Lock but has not yet incremented
+			// Process.inFlightRequests races with Stop() and can be killed
+			// mid-request.
+			pg.inflight.Wait()
+
 			// is there something already running?
 			if pg.lastUsedProcess != "" {
 				lastProcess := pg.processes[pg.lastUsedProcess]
@@ -79,7 +103,16 @@ func (pg *ProcessGroup) ProxyRequest(modelID string, writer http.ResponseWriter,
 			pg.Unlock()
 			return nil
 		}
+
+		// Fast path: register this request in inflight before releasing
+		// pg.Lock so a concurrent swap will wait for it to complete.
+		pg.inflight.Add(1)
+		defer pg.inflight.Done()
 		pg.Unlock()
+
+		if pg.testDelayFastPath != nil {
+			pg.testDelayFastPath()
+		}
 	}
 
 	pg.processes[modelID].ProxyRequest(writer, request)
@@ -143,6 +176,10 @@ func (pg *ProcessGroup) SleepProcess(modelID string) error {
 func (pg *ProcessGroup) StopProcesses(strategy StopStrategy) {
 	pg.Lock()
 	defer pg.Unlock()
+
+	if strategy != StopImmediately {
+		pg.inflight.Wait()
+	}
 
 	if len(pg.processes) == 0 {
 		return

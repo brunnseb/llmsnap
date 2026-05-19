@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestConfig_GroupMemberIsUnique(t *testing.T) {
@@ -848,6 +849,71 @@ func TestConfig_APIKeys_EnvMacros(t *testing.T) {
 	})
 }
 
+func TestConfig_GlobalTTL(t *testing.T) {
+	t.Run("globalTTL sets default for models", func(t *testing.T) {
+		content := `
+globalTTL: 300
+models:
+  model1:
+    cmd: server --port ${PORT}
+`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+		assert.Equal(t, 300, config.GlobalTTL)
+		assert.Equal(t, 300, config.Models["model1"].UnloadAfter)
+	})
+
+	t.Run("model ttl=0 overrides globalTTL", func(t *testing.T) {
+		content := `
+globalTTL: 300
+models:
+  model1:
+    cmd: server --port ${PORT}
+    ttl: 0
+`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+		assert.Equal(t, 0, config.Models["model1"].UnloadAfter)
+	})
+
+	t.Run("model explicit ttl overrides globalTTL", func(t *testing.T) {
+		content := `
+globalTTL: 300
+models:
+  model1:
+    cmd: server --port ${PORT}
+    ttl: 600
+`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+		assert.Equal(t, 600, config.Models["model1"].UnloadAfter)
+	})
+
+	t.Run("globalTTL defaults to 0", func(t *testing.T) {
+		content := `
+models:
+  model1:
+    cmd: server --port ${PORT}
+`
+		config, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.NoError(t, err)
+		assert.Equal(t, 0, config.GlobalTTL)
+		assert.Equal(t, 0, config.Models["model1"].UnloadAfter)
+	})
+
+	t.Run("negative globalTTL rejected", func(t *testing.T) {
+		content := `
+globalTTL: -1
+models:
+  model1:
+    cmd: server --port ${PORT}
+`
+		_, err := LoadConfigFromReader(strings.NewReader(content))
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "globalTTL must be >= 0")
+	})
+}
+
 func TestConfig_EnvMacros(t *testing.T) {
 	t.Run("basic env substitution in cmd", func(t *testing.T) {
 		t.Setenv("TEST_MODEL_PATH", "/opt/models")
@@ -1374,247 +1440,107 @@ models:
 
 }
 
-func TestConfig_SleepWakeBasicConfiguration(t *testing.T) {
-	content := `
-startPort: 10000
-sleepRequestTimeout: 15
-wakeRequestTimeout: 20
-
-models:
-  vllm-model:
-    cmd: python -m vllm.entrypoints.openai.api_server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep?level=1
-        method: POST
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-`
-
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
-
-	// Verify global timeout settings
-	assert.Equal(t, 15, config.SleepRequestTimeout)
-	assert.Equal(t, 20, config.WakeRequestTimeout)
-
-	// Verify model sleep/wake endpoints
-	model := config.Models["vllm-model"]
-	assert.Len(t, model.SleepEndpoints, 1)
-	assert.Len(t, model.WakeEndpoints, 1)
-
-	// Check sleep endpoint
-	assert.Equal(t, "/sleep?level=1", model.SleepEndpoints[0].Endpoint)
-	assert.Equal(t, "POST", model.SleepEndpoints[0].Method)
-	assert.Equal(t, 15, model.SleepEndpoints[0].Timeout) // inherited from global
-
-	// Check wake endpoint
-	assert.Equal(t, "/wake_up", model.WakeEndpoints[0].Endpoint)
-	assert.Equal(t, "POST", model.WakeEndpoints[0].Method)
-	assert.Equal(t, 20, model.WakeEndpoints[0].Timeout) // inherited from global
-}
-
-func TestConfig_SleepWakeMacroSubstitution(t *testing.T) {
-	content := `
-startPort: 10000
-macros:
-  SLEEP_LEVEL: "2"
-
-models:
-  vllm-model:
-    cmd: python -m vllm --port ${PORT} --model ${MODEL_ID}
-    sleepEndpoints:
-      - endpoint: /sleep?level=${SLEEP_LEVEL}&port=${PORT}
-        method: POST
-        body: '{"model": "${MODEL_ID}"}'
-    wakeEndpoints:
-      - endpoint: /wake_up?port=${PORT}
-        method: POST
-        body: '{"model_id": "${MODEL_ID}", "port": ${PORT}}'
-`
-
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
-
-	model := config.Models["vllm-model"]
-
-	// Verify macros were substituted in sleep endpoints
-	assert.Equal(t, "/sleep?level=2&port=10000", model.SleepEndpoints[0].Endpoint)
-	assert.Equal(t, `{"model": "vllm-model"}`, model.SleepEndpoints[0].Body)
-
-	// Verify macros were substituted in wake endpoints
-	assert.Equal(t, "/wake_up?port=10000", model.WakeEndpoints[0].Endpoint)
-	assert.Equal(t, `{"model_id": "vllm-model", "port": 10000}`, model.WakeEndpoints[0].Body)
-}
-
-func TestConfig_SleepWakeTimeoutOverrides(t *testing.T) {
-	content := `
-startPort: 10000
-sleepRequestTimeout: 10
-wakeRequestTimeout: 15
-
-models:
-  test-model:
-    cmd: server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep
-        method: POST
-        timeout: 30
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-        timeout: 45
-      - endpoint: /reset
-        method: POST
-        # This one should inherit global timeout
-`
-
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
-
-	model := config.Models["test-model"]
-
-	// Verify per-endpoint timeout overrides global
-	assert.Equal(t, 30, model.SleepEndpoints[0].Timeout)
-	assert.Equal(t, 45, model.WakeEndpoints[0].Timeout)
-
-	// Verify second wake endpoint inherits global timeout
-	assert.Equal(t, 15, model.WakeEndpoints[1].Timeout)
-}
-
-func TestConfig_SleepWakeMultiStepWake(t *testing.T) {
-	content := `
-startPort: 10000
-
-models:
-  vllm-level2:
-    cmd: python -m vllm --port ${PORT} --enable-sleep-mode
-    sleepEndpoints:
-      - endpoint: /sleep?level=2
-        method: POST
-        timeout: 15
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-      - endpoint: /collective_rpc
-        method: POST
-        body: '{"method": "reload_weights"}'
-        timeout: 12
-      - endpoint: /reset_prefix_cache
-        method: POST
-`
-
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
-
-	model := config.Models["vllm-level2"]
-
-	// Verify sleep endpoint
-	assert.Len(t, model.SleepEndpoints, 1)
-	assert.Equal(t, "/sleep?level=2", model.SleepEndpoints[0].Endpoint)
-	assert.Equal(t, 15, model.SleepEndpoints[0].Timeout)
-
-	// Verify multi-step wake sequence
-	assert.Len(t, model.WakeEndpoints, 3)
-
-	// Step 1: Wake up
-	assert.Equal(t, "/wake_up", model.WakeEndpoints[0].Endpoint)
-	assert.Equal(t, "POST", model.WakeEndpoints[0].Method)
-	assert.Equal(t, 10, model.WakeEndpoints[0].Timeout) // default
-
-	// Step 2: Reload weights
-	assert.Equal(t, "/collective_rpc", model.WakeEndpoints[1].Endpoint)
-	assert.Equal(t, "POST", model.WakeEndpoints[1].Method)
-	assert.Equal(t, `{"method": "reload_weights"}`, model.WakeEndpoints[1].Body)
-	assert.Equal(t, 12, model.WakeEndpoints[1].Timeout)
-
-	// Step 3: Reset cache
-	assert.Equal(t, "/reset_prefix_cache", model.WakeEndpoints[2].Endpoint)
-	assert.Equal(t, "POST", model.WakeEndpoints[2].Method)
-	assert.Equal(t, 10, model.WakeEndpoints[2].Timeout) // default
-}
-
-func TestConfig_SleepWakeUnknownMacroInEndpoints(t *testing.T) {
-	content := `
-startPort: 10000
-
-models:
-  test-model:
-    cmd: server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep?level=${UNKNOWN_MACRO}
-        method: POST
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-`
-
-	_, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "UNKNOWN_MACRO")
-	assert.Contains(t, err.Error(), "test-model")
-	assert.Contains(t, err.Error(), "sleepEndpoints")
-}
-
-func TestConfig_SleepWakeDefaultTimeouts(t *testing.T) {
-	content := `
-startPort: 10000
-
-models:
-  test-model:
-    cmd: server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep
-        method: POST
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-`
-
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
-
-	model := config.Models["test-model"]
-
-	// Verify default timeouts are applied (10 seconds from config.go defaults)
-	assert.Equal(t, 10, model.SleepEndpoints[0].Timeout)
-	assert.Equal(t, 10, model.WakeEndpoints[0].Timeout)
-}
-
-func TestConfig_SleepWakeModelLevelMacros(t *testing.T) {
-	content := `
-startPort: 10000
-macros:
-  LEVEL: "1"
-
+func TestConfig_TimeoutsParsing(t *testing.T) {
+	configYaml := `
 models:
   model1:
-    macros:
-      LEVEL: "2"
-    cmd: server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep?level=${LEVEL}
-        method: POST
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
-
-  model2:
-    cmd: server --port ${PORT}
-    sleepEndpoints:
-      - endpoint: /sleep?level=${LEVEL}
-        method: POST
-    wakeEndpoints:
-      - endpoint: /wake_up
-        method: POST
+    cmd: test-server --port ${PORT}
+    timeouts:
+      connect: 45
+      responseHeader: 120
 `
 
-	config, err := LoadConfigFromReader(strings.NewReader(content))
-	assert.NoError(t, err)
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
 
-	// model1 should use model-level macro override
-	assert.Equal(t, "/sleep?level=2", config.Models["model1"].SleepEndpoints[0].Endpoint)
+	modelConfig, found := config.Models["model1"]
+	require.True(t, found, "model1 should exist in config")
 
-	// model2 should use global macro
-	assert.Equal(t, "/sleep?level=1", config.Models["model2"].SleepEndpoints[0].Endpoint)
+	assert.Equal(t, 45, modelConfig.Timeouts.Connect)
+	assert.Equal(t, 120, modelConfig.Timeouts.ResponseHeader)
+}
+
+func TestConfig_TimeoutsDefaults(t *testing.T) {
+	configYaml := `
+models:
+  model1:
+    cmd: test-server --port ${PORT}
+`
+
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+
+	modelConfig, found := config.Models["model1"]
+	require.True(t, found, "model1 should exist in config")
+
+	// Default values should be set during unmarshaling
+	assert.Equal(t, 30, modelConfig.Timeouts.Connect)
+	assert.Equal(t, 0, modelConfig.Timeouts.ResponseHeader)
+	assert.Equal(t, 10, modelConfig.Timeouts.TLSHandshake)
+	assert.Equal(t, 1, modelConfig.Timeouts.ExpectContinue)
+	assert.Equal(t, 90, modelConfig.Timeouts.IdleConn)
+}
+
+func TestConfig_TimeoutsZeroAllowed(t *testing.T) {
+	configYaml := `
+models:
+  model1:
+    cmd: test-server --port ${PORT}
+    timeouts:
+      connect: 0
+      responseHeader: 0
+`
+
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+
+	modelConfig, found := config.Models["model1"]
+	require.True(t, found, "model1 should exist in config")
+
+	// Explicit 0 should be preserved (disables timeout)
+	assert.Equal(t, 0, modelConfig.Timeouts.Connect)
+	assert.Equal(t, 0, modelConfig.Timeouts.ResponseHeader)
+}
+
+func TestConfig_PeerTimeoutsParsing(t *testing.T) {
+	configYaml := `
+peers:
+  peer1:
+    proxy: http://example.com
+    models: [model1]
+    timeouts:
+      connect: 45
+      responseHeader: 120
+`
+
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+
+	peerConfig, found := config.Peers["peer1"]
+	require.True(t, found, "peer1 should exist in config")
+
+	assert.Equal(t, 45, peerConfig.Timeouts.Connect)
+	assert.Equal(t, 120, peerConfig.Timeouts.ResponseHeader)
+}
+
+func TestConfig_PeerTimeoutsDefaults(t *testing.T) {
+	configYaml := `
+peers:
+  peer1:
+    proxy: http://example.com
+    models: [model1]
+`
+
+	config, err := LoadConfigFromReader(strings.NewReader(configYaml))
+	require.NoError(t, err)
+
+	peerConfig, found := config.Peers["peer1"]
+	require.True(t, found, "peer1 should exist in config")
+
+	// Default values should be set during unmarshaling
+	assert.Equal(t, 30, peerConfig.Timeouts.Connect)
+	assert.Equal(t, 60, peerConfig.Timeouts.ResponseHeader)
+	assert.Equal(t, 10, peerConfig.Timeouts.TLSHandshake)
+	assert.Equal(t, 1, peerConfig.Timeouts.ExpectContinue)
+	assert.Equal(t, 90, peerConfig.Timeouts.IdleConn)
 }

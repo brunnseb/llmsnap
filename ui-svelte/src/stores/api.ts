@@ -1,5 +1,14 @@
 import { writable } from "svelte/store";
-import type { Model, Metrics, VersionInfo, LogData, APIEventEnvelope, ReqRespCapture } from "../lib/types";
+import type {
+  Model,
+  ActivityLogEntry,
+  VersionInfo,
+  LogData,
+  APIEventEnvelope,
+  ReqRespCapture,
+  InFlightStats,
+  PerformanceResponse,
+} from "../lib/types";
 import { connectionState } from "./theme";
 
 const LOG_LENGTH_LIMIT = 1024 * 100; /* 100KB of log data */
@@ -8,7 +17,8 @@ const LOG_LENGTH_LIMIT = 1024 * 100; /* 100KB of log data */
 export const models = writable<Model[]>([]);
 export const proxyLogs = writable<string>("");
 export const upstreamLogs = writable<string>("");
-export const metrics = writable<Metrics[]>([]);
+export const metrics = writable<ActivityLogEntry[]>([]);
+export const inFlightRequests = writable<number>(0);
 export const versionInfo = writable<VersionInfo>({
   build_date: "unknown",
   commit: "unknown",
@@ -29,6 +39,7 @@ export function enableAPIEvents(enabled: boolean): void {
     apiEventSource?.close();
     apiEventSource = null;
     metrics.set([]);
+    inFlightRequests.set(0);
     return;
   }
 
@@ -46,6 +57,7 @@ export function enableAPIEvents(enabled: boolean): void {
       proxyLogs.set("");
       upstreamLogs.set("");
       metrics.set([]);
+      inFlightRequests.set(0);
       models.set([]);
       retryCount = 0;
       connectionState.set("connected");
@@ -59,7 +71,7 @@ export function enableAPIEvents(enabled: boolean): void {
             const newModels = JSON.parse(message.data) as Model[];
             // Sort models by name and id
             newModels.sort((a, b) => {
-              return (a.name + a.id).localeCompare(b.name + b.id);
+              return (a.name + a.id).localeCompare(b.name + b.id, undefined, { numeric: true });
             });
             models.set(newModels);
             break;
@@ -79,8 +91,13 @@ export function enableAPIEvents(enabled: boolean): void {
           }
 
           case "metrics": {
-            const newMetrics = JSON.parse(message.data) as Metrics[];
+            const newMetrics = JSON.parse(message.data) as ActivityLogEntry[];
             metrics.update((prevMetrics) => [...newMetrics, ...prevMetrics]);
+            break;
+          }
+          case "inflight": {
+            const stats = JSON.parse(message.data) as InFlightStats;
+            inFlightRequests.set(stats.total ?? 0);
             break;
           }
         }
@@ -199,6 +216,20 @@ export async function getCapture(id: number): Promise<ReqRespCapture | null> {
     return await response.json();
   } catch (error) {
     console.error("Failed to fetch capture:", error);
+    return null;
+  }
+}
+
+export async function fetchPerformance(after?: string): Promise<PerformanceResponse | null> {
+  try {
+    const url = after ? `/api/performance?after=${encodeURIComponent(after)}` : "/api/performance";
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error("Failed to fetch performance data:", error);
     return null;
   }
 }

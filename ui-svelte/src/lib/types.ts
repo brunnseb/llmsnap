@@ -9,18 +9,25 @@ export interface Model {
   description: string;
   unlisted: boolean;
   peerID: string;
-  sleepMode: string;
+  aliases?: string[];
 }
 
-export interface Metrics {
-  id: number;
-  timestamp: string;
-  model: string;
+export interface TokenMetrics {
   cache_tokens: number;
   input_tokens: number;
   output_tokens: number;
   prompt_per_second: number;
   tokens_per_second: number;
+}
+
+export interface ActivityLogEntry {
+  id: number;
+  timestamp: string;
+  model: string;
+  req_path: string;
+  resp_content_type: string;
+  resp_status_code: number;
+  tokens: TokenMetrics;
   duration_ms: number;
   has_capture: boolean;
 }
@@ -39,9 +46,63 @@ export interface LogData {
   data: string;
 }
 
+export interface InFlightStats {
+  total: number;
+}
+
+export interface NetIOStat {
+  name: string;
+  bytes_recv: number;
+  bytes_sent: number;
+}
+
+export interface SysStat {
+  timestamp: string;
+  cpu_util_per_core: number[];
+  mem_total_mb: number;
+  mem_used_mb: number;
+  mem_free_mb: number;
+  swap_total_mb: number;
+  swap_used_mb: number;
+  load_avg_1: number;
+  load_avg_5: number;
+  load_avg_15: number;
+  net_io: NetIOStat[];
+}
+
+export interface GpuStat {
+  timestamp: string;
+  id: number;
+  name: string;
+  uuid: string;
+  temp_c: number;
+  vram_temp_c: number;
+  gpu_util_pct: number;
+  mem_util_pct: number;
+  mem_used_mb: number;
+  mem_total_mb: number;
+  fan_speed_pct: number;
+  power_draw_w: number;
+}
+
+export interface PerformanceResponse {
+  sys_stats: SysStat[];
+  gpu_stats: GpuStat[];
+}
+
 export interface APIEventEnvelope {
-  type: "modelStatus" | "logData" | "metrics";
+  type: "modelStatus" | "logData" | "metrics" | "inflight" | "perfsys" | "perfgpu";
   data: string;
+}
+
+export interface HistogramData {
+  bins: number[];
+  min: number;
+  max: number;
+  binSize: number;
+  p99: number;
+  p95: number;
+  p50: number;
 }
 
 export interface VersionInfo {
@@ -109,6 +170,40 @@ export interface ImageGenerationResponse {
     url?: string;
     b64_json?: string;
   }>;
+}
+
+// SDAPI types (stable-diffusion.cpp)
+export type ImageApiMode = "openai" | "sdapi";
+
+export interface SdApiLora {
+  name: string;
+  path: string;
+}
+
+export interface SdApiLoraRef {
+  path: string;
+  multiplier: number;
+}
+
+export interface SdApiTxt2ImgRequest {
+  model?: string;
+  prompt: string;
+  negative_prompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfg_scale?: number;
+  seed?: number;
+  batch_size?: number;
+  sampler_name?: string;
+  scheduler?: string;
+  lora?: SdApiLoraRef[];
+}
+
+export interface SdApiResponse {
+  images: string[];
+  parameters: Record<string, unknown>;
+  info: string;
 }
 
 export interface AudioTranscriptionRequest {

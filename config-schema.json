@@ -39,6 +39,49 @@
             },
             "default": {},
             "description": "A dictionary of string substitutions. Macros are reusable snippets used in model cmd, cmdStop, proxy, checkEndpoint, filters.stripParams. Macro names must be <64 chars, match ^[a-zA-Z0-9_-]+$, and not be PORT or MODEL_ID. Values can be string, number, or boolean. Macros can reference other macros defined before them."
+        },
+        "timeouts": {
+            "type": "object",
+            "properties": {
+                "connect": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 30,
+                    "description": "TCP connection timeout in seconds. Set to 0 to disable."
+                },
+                "keepalive": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 30,
+                    "description": "TCP keepalive timeout in seconds. Set to 0 to disable."
+                },
+                "responseHeader": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Time to wait for response headers in seconds. Set to 0 to disable."
+                },
+                "tlsHandshake": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 10,
+                    "description": "TLS handshake timeout in seconds. Set to 0 to disable."
+                },
+                "expectContinue": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 1,
+                    "description": "Expect-Continue timeout in seconds. Set to 0 to disable."
+                },
+                "idleConn": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 90,
+                    "description": "Idle connection timeout in seconds. Set to 0 to disable."
+                }
+            },
+            "additionalProperties": false,
+            "description": "Timeout settings for proxy connections."
         }
     },
     "properties": {
@@ -48,17 +91,11 @@
             "default": 120,
             "description": "Number of seconds to wait for a model to be ready to serve requests."
         },
-        "sleepRequestTimeout": {
+        "globalTTL": {
             "type": "integer",
-            "minimum": 1,
-            "default": 10,
-            "description": "Number of seconds to wait for each sleep HTTP request to complete. Applies globally to all sleep endpoints unless overridden per-endpoint with timeout field."
-        },
-        "wakeRequestTimeout": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 10,
-            "description": "Number of seconds to wait for each wake HTTP request to complete. Applies globally to all wake endpoints unless overridden per-endpoint with timeout field."
+            "minimum": 0,
+            "default": 0,
+            "description": "Default TTL for all models in seconds, 0 means no TTL and models will never be automatically unloaded"
         },
         "logLevel": {
             "type": "string",
@@ -104,6 +141,25 @@
             "minimum": 0,
             "default": 5,
             "description": "Size in megabytes of the buffer for storing request/response captures. Set to 0 to disable captures."
+        },
+        "performance": {
+            "type": "object",
+            "properties": {
+                "disabled": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Disable system performance monitoring."
+                },
+                "every": {
+                    "type": "string",
+                    "pattern": "^[-+]?(\\d+(\\.\\d+)?(ns|us|ms|s|m|h))+$",
+                    "default": "15s",
+                    "description": "Delay between polling for new performance statistics. Minimum duration is 1s. Lower values use more RAM as stats are kept in memory."
+                }
+            },
+            "additionalProperties": false,
+            "default": {},
+            "description": "Configuration for CPU, RAM and GPU monitoring statistics."
         },
         "startPort": {
             "type": "integer",
@@ -189,9 +245,9 @@
                     },
                     "ttl": {
                         "type": "integer",
-                        "minimum": 0,
-                        "default": 0,
-                        "description": "Automatically unload the model after ttl seconds. 0 disables unloading. Must be >0 to enable."
+                        "minimum": -1,
+                        "default": -1,
+                        "description": "Automatically unload the model after ttl seconds. -1 uses the global TTL value, 0 disables unloading. Must be >0 to enable."
                     },
                     "useModelName": {
                         "type": "string",
@@ -212,11 +268,20 @@
                                 "additionalProperties": true,
                                 "default": {},
                                 "description": "Dictionary of parameters to set/override in requests. Useful for enforcing specific parameter values. Protected params like 'model' cannot be overridden. Values can be strings, numbers, booleans, arrays, or objects."
+                            },
+                            "setParamsByID": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "object",
+                                    "additionalProperties": true
+                                },
+                                "default": {},
+                                "description": "Dictionary mapping requested model IDs (or aliases) to parameters to set/override in requests. Applied after setParams and can override those values. Useful with aliases to vary behaviour depending on which alias the client used (e.g. different reasoning_effort per alias). Keys support ${MODEL_ID} macro substitution. Protected params like 'model' cannot be overridden."
                             }
                         },
                         "additionalProperties": false,
                         "default": {},
-                        "description": "Dictionary of filter settings. Supports stripParams and setParams."
+                        "description": "Dictionary of filter settings. Supports stripParams, setParams, and setParamsByID."
                     },
                     "metadata": {
                         "type": "object",
@@ -239,79 +304,8 @@
                         "default": false,
                         "description": "If true the model will not show up in /v1/models responses. It can still be used as normal in API requests."
                     },
-                    "sleepMode": {
-                        "type": "string",
-                        "enum": ["enable", "disable"],
-                        "default": "disable",
-                        "description": "Explicitly controls sleep/wake behavior. 'enable' activates sleep/wake functionality and requires sleepEndpoints and wakeEndpoints to be defined."
-                    },
-                    "sleepEndpoints": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["endpoint"],
-                            "properties": {
-                                "endpoint": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "URL path for the sleep endpoint (e.g., /sleep?level=1)."
-                                },
-                                "method": {
-                                    "type": "string",
-                                    "enum": ["GET", "POST", "PUT", "PATCH"],
-                                    "default": "POST",
-                                    "description": "HTTP method to use for the request."
-                                },
-                                "body": {
-                                    "type": "string",
-                                    "default": "",
-                                    "description": "Optional request body (JSON string)."
-                                },
-                                "timeout": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "default": 0,
-                                    "description": "Optional per-endpoint timeout in seconds. 0 uses global sleepRequestTimeout."
-                                }
-                            },
-                            "additionalProperties": false
-                        },
-                        "default": [],
-                        "description": "Array of HTTP endpoints to call for putting the model to sleep. Requires sleepMode to be 'enable'. Endpoints are called sequentially in array order. Used instead of cmdStop during model swapping."
-                    },
-                    "wakeEndpoints": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["endpoint"],
-                            "properties": {
-                                "endpoint": {
-                                    "type": "string",
-                                    "minLength": 1,
-                                    "description": "URL path for the wake endpoint (e.g., /wake_up)."
-                                },
-                                "method": {
-                                    "type": "string",
-                                    "enum": ["GET", "POST", "PUT", "PATCH"],
-                                    "default": "POST",
-                                    "description": "HTTP method to use for the request."
-                                },
-                                "body": {
-                                    "type": "string",
-                                    "default": "",
-                                    "description": "Optional request body (JSON string)."
-                                },
-                                "timeout": {
-                                    "type": "integer",
-                                    "minimum": 0,
-                                    "default": 0,
-                                    "description": "Optional per-endpoint timeout in seconds. 0 uses global wakeRequestTimeout."
-                                }
-                            },
-                            "additionalProperties": false
-                        },
-                        "default": [],
-                        "description": "Array of HTTP endpoints to call for waking the model. Requires sleepMode to be 'enable'. Required when sleepMode is 'enable'. Endpoints are called sequentially in array order."
+                    "timeouts": {
+                        "$ref": "#/definitions/timeouts"
                     }
                 }
             }
@@ -349,6 +343,44 @@
                 }
             },
             "description": "A dictionary of group settings. Provides advanced controls over model swapping behaviour. Model IDs must be defined in models. A model can only be a member of one group. Behaviour controlled via swap, exclusive, persistent."
+        },
+        "matrix": {
+            "type": "object",
+            "description": "Solver-based alternative to groups. Declares valid combinations of concurrent models. The solver minimizes eviction cost when swapping. A config must use either groups or matrix, not both.",
+            "required": [
+                "vars",
+                "sets"
+            ],
+            "properties": {
+                "vars": {
+                    "type": "object",
+                    "description": "Short names for models. Keys must be alphanumeric, 1-8 characters. All sets and evict_costs must use these IDs.",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "propertyNames": {
+                        "pattern": "^[a-zA-Z0-9]{1,8}$"
+                    }
+                },
+                "evict_costs": {
+                    "type": "object",
+                    "description": "Relative cost of evicting a running model. Models not listed default to 1. Values must be positive integers.",
+                    "additionalProperties": {
+                        "type": "integer",
+                        "minimum": 1
+                    }
+                },
+                "sets": {
+                    "type": "object",
+                    "description": "Named sets of concurrent model combinations. Values are DSL strings using & (AND), | (OR), () (grouping), and +ref (inline another set). Definition order is used for tie-breaking.",
+                    "minProperties": 1,
+                    "additionalProperties": {
+                        "type": "string"
+                    }
+                }
+            },
+            "additionalProperties": false
         },
         "hooks": {
             "type": "object",
@@ -438,11 +470,70 @@
                         "additionalProperties": false,
                         "default": {},
                         "description": "Dictionary of filter settings for peer requests. Supports stripParams and setParams."
+                    },
+                    "timeouts": {
+                        "type": "object",
+                        "properties": {
+                            "connect": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 30,
+                                "description": "TCP connection timeout in seconds."
+                            },
+                            "keepalive": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 30,
+                                "description": "TCP keepalive connection timeout in seconds."
+                            },
+                            "responseHeader": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 0,
+                                "description": "Time to wait for response headers in seconds."
+                            },
+                            "tlsHandshake": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 10,
+                                "description": "TLS handshake timeout in seconds."
+                            },
+                            "idleConn": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "default": 90,
+                                "description": "Idle connection timeout in seconds."
+                            }
+                        },
+                        "additionalProperties": false,
+                        "description": "Timeout settings for proxy connections to this peer."
                     }
                 }
             },
             "default": {},
             "description": "A dictionary of remote peers and models they provide. Peers can be another llmsnap or any server that provides the /v1/ generative API endpoints supported by llmsnap."
         }
-    }
+    },
+    "allOf": [
+        {
+            "if": {
+                "required": ["groups"]
+            },
+            "then": {
+                "not": {
+                    "required": ["matrix"]
+                }
+            }
+        },
+        {
+            "if": {
+                "required": ["matrix"]
+            },
+            "then": {
+                "not": {
+                    "required": ["groups"]
+                }
+            }
+        }
+    ]
 }

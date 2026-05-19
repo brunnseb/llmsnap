@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -163,6 +164,15 @@ groups:
 
 	modelLoadingState := false
 
+	defaultTimeout := TimeoutsConfig{
+		Connect:        30,
+		KeepAlive:      30,
+		ResponseHeader: 0,
+		TLSHandshake:   10,
+		ExpectContinue: 1,
+		IdleConn:       90,
+	}
+
 	expected := Config{
 		LogLevel:      "info",
 		LogTimeFormat: "",
@@ -188,6 +198,7 @@ groups:
 				Description:      "This is model 1",
 				SleepMode:        SleepModeDisable,
 				SendLoadingState: &modelLoadingState,
+				Timeouts:         defaultTimeout,
 			},
 			"model2": {
 				Cmd:              "path/to/server --arg1 one",
@@ -197,6 +208,7 @@ groups:
 				CheckEndpoint:    "/",
 				SleepMode:        SleepModeDisable,
 				SendLoadingState: &modelLoadingState,
+				Timeouts:         defaultTimeout,
 			},
 			"model3": {
 				Cmd:              "path/to/cmd --arg1 one",
@@ -206,6 +218,7 @@ groups:
 				CheckEndpoint:    "/",
 				SleepMode:        SleepModeDisable,
 				SendLoadingState: &modelLoadingState,
+				Timeouts:         defaultTimeout,
 			},
 			"model4": {
 				Cmd:              "path/to/cmd --arg1 one",
@@ -215,13 +228,15 @@ groups:
 				Env:              []string{},
 				SleepMode:        SleepModeDisable,
 				SendLoadingState: &modelLoadingState,
+				Timeouts:         defaultTimeout,
 			},
 		},
-		HealthCheckTimeout:  15,
-		SleepRequestTimeout: 10,
-		WakeRequestTimeout:  10,
-		MetricsMaxInMemory:  1000,
-		CaptureBuffer:       5,
+		HealthCheckTimeout: 15,
+		MetricsMaxInMemory: 1000,
+		CaptureBuffer:      5,
+		Performance: PerformanceConfig{
+			Every: 5 * time.Second,
+		},
 		Profiles: map[string][]string{
 			"test": {"model1", "model2"},
 		},

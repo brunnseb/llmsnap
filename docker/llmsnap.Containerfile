@@ -3,8 +3,11 @@ ARG BASE_TAG=server-cuda
 FROM ${BASE_IMAGE}:${BASE_TAG}
 
 # has to be after the FROM
-ARG LS_VER=0.0.1
-ARG LS_REPO=napmany/llmsnap
+# TARGETARCH is auto-set by `docker buildx build --platform …` (amd64/arm64);
+# falls back to amd64 when an older `docker build` runs without buildx.
+ARG TARGETARCH=amd64
+ARG LS_VER=170
+ARG LS_REPO=mostlygeek/llama-swap
 
 # Set default UID/GID arguments
 ARG UID=10001
@@ -34,9 +37,9 @@ WORKDIR /app
 ENV PATH="/app:${PATH}"
 
 RUN \
-    curl -LO "https://github.com/${LS_REPO}/releases/download/v${LS_VER}/llmsnap_${LS_VER}_linux_amd64.tar.gz" && \
-    tar -zxf "llmsnap_${LS_VER}_linux_amd64.tar.gz" && \
-    rm "llmsnap_${LS_VER}_linux_amd64.tar.gz"
+    curl -LO "https://github.com/${LS_REPO}/releases/download/v${LS_VER}/llama-swap_${LS_VER}_linux_${TARGETARCH}.tar.gz" && \
+    tar -zxf "llama-swap_${LS_VER}_linux_${TARGETARCH}.tar.gz" && \
+    rm "llama-swap_${LS_VER}_linux_${TARGETARCH}.tar.gz"
 
 COPY --chown=$UID:$GID config.example.yaml /app/config.yaml
 

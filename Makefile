@@ -25,15 +25,15 @@ proxy/ui_dist/placeholder.txt:
 
 # use cached test results while developing
 test-dev: proxy/ui_dist/placeholder.txt
-	go test -short ./proxy/...
-	staticcheck ./proxy/... || true
+	go test -short ./proxy/... ./internal/...
+	staticcheck ./proxy/... ./internal/... || true
 
 test: proxy/ui_dist/placeholder.txt
-	go test -short -count=1 ./proxy/...
+	go test -short -count=1 ./proxy/... ./internal/...
 
 # for CI - full test (takes longer)
 test-all: proxy/ui_dist/placeholder.txt
-	go test -race -count=1 ./proxy/...
+	go test -race -count=1 ./proxy/... ./internal/...
 
 ui/node_modules:
 	cd ui-svelte && npm install
@@ -48,9 +48,14 @@ mac: ui
 	GOOS=darwin GOARCH=arm64 go build -ldflags="-X main.commit=${GIT_HASH} -X main.version=local_${GIT_HASH} -X main.date=${BUILD_DATE}" -o $(BUILD_DIR)/$(APP_NAME)-darwin-arm64
 
 # Build Linux binary
-linux: ui
-	@echo "Building Linux binary..."
+linux: linux-arm64 linux-amd64
+
+linux-amd64: ui
+	@echo "Building Linux AMD64 binary..."
 	GOOS=linux GOARCH=amd64 go build -ldflags="-X main.commit=${GIT_HASH} -X main.version=local_${GIT_HASH} -X main.date=${BUILD_DATE}" -o $(BUILD_DIR)/$(APP_NAME)-linux-amd64
+
+linux-arm64: ui
+	@echo "Building Linux ARM64 binary..."
 	GOOS=linux GOARCH=arm64 go build -ldflags="-X main.commit=${GIT_HASH} -X main.version=local_${GIT_HASH} -X main.date=${BUILD_DATE}" -o $(BUILD_DIR)/$(APP_NAME)-linux-arm64
 
 # Build Windows binary
@@ -92,5 +97,9 @@ wol-proxy: $(BUILD_DIR)
 	@echo "Building wol-proxy"
 	go build -o $(BUILD_DIR)/wol-proxy-$(GOOS)-$(GOARCH)-$(shell date +%Y-%m-%d) cmd/wol-proxy/wol-proxy.go
 
+test-ui:
+	cd ui-svelte && npm ci && npm run check && npm test
+
 # Phony targets
-.PHONY: all clean ui mac linux windows simple-responder simple-responder-windows test test-all test-dev wol-proxy
+.PHONY: all clean ui mac windows simple-responder simple-responder-windows test test-all test-dev test-ui wol-proxy
+.PHONE: linux linux-arm64 linux-amd64
