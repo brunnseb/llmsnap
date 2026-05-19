@@ -95,6 +95,7 @@ func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		UnloadAfter:      MODEL_CONFIG_DEFAULT_TTL, // use GlobalTTL
 		Unlisted:         false,
 		UseModelName:     "",
+		SleepMode:        SleepModeDisable,
 		ConcurrencyLimit: 0,
 		Name:             "",
 		Description:      "",
@@ -123,10 +124,10 @@ func (m *ModelConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 	// Validate sleepMode field
 	switch m.SleepMode {
-	case SleepModeEnable, SleepModeDisable:
-		// Valid values
+	case SleepModeEnable, SleepModeDisable, "":
+		// Valid values (empty string means no sleep/wake)
 	default:
-		return fmt.Errorf("invalid sleepMode value '%s': must be 'enable' or 'disable'", m.SleepMode)
+		return fmt.Errorf("invalid sleepMode value '%s': must be 'enable', 'disable', or empty", m.SleepMode)
 	}
 
 	// Require endpoints when sleepMode is "enable"

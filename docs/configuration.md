@@ -75,6 +75,7 @@ llmsnap supports many more features to customize how you want to manage your env
 | Feature   | Description                                    |
 | --------- | ---------------------------------------------- |
 | `ttl`     | automatic unloading of models after a timeout  |
+| `sleep`   | GPU memory preservation via sleep/wake states  |
 | `macros`  | reusable snippets to use in configurations     |
 | `matrix`  | run multiple models at a time                  |
 | `hooks`   | event driven functionality                     |
@@ -293,6 +294,35 @@ models:
     # - a ttl of 0 will mean never unload
     # - a value of 0 disables automatic unloading of the model
     ttl: 60
+
+    # sleepMode: controls sleep/wake behavior for GPU memory preservation
+    # - optional, default: "disable"
+    # - valid values: "enable", "disable"
+    # - when enabled, models are put to sleep (instead of stopped) when idle
+    # - sleeping keeps GPU state for faster wake-up times
+    # - requires both sleepEndpoints and wakeEndpoints to be configured
+    sleepMode: "enable"
+
+    # sleepEndpoints: array of HTTP endpoints to call when putting a model to sleep
+    # - optional, default: []
+    # - each endpoint is called in sequence
+    # - required when sleepMode is "enable"
+    # - endpoints are sent to the upstream server (e.g., llama-server)
+    sleepEndpoints:
+      - endpoint: /v1/sleep
+        method: POST
+        timeout: 10
+
+    # wakeEndpoints: array of HTTP endpoints to call when waking a model from sleep
+    # - optional, default: []
+    # - each endpoint is called in sequence
+    # - required when sleepMode is "enable"
+    # - endpoints are sent to the upstream server (e.g., llama-server)
+    wakeEndpoints:
+      - endpoint: /v1/wake
+        method: POST
+        timeout: 10
+
 
     # useModelName: override the model name that is sent to upstream server
     # - optional, default: ""

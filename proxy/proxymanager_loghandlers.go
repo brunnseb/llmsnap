@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mostlygeek/llama-swap/internal/logmon"
+	"github.com/napmany/llmsnap/internal/logmon"
 )
 
 func (pm *ProxyManager) sendLogsHandlers(c *gin.Context) {

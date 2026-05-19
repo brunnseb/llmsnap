@@ -715,6 +715,58 @@ groups:
 	assert.Equal(t, proxy.processGroups[testGroupId].processes["model2"].CurrentState(), StateReady)
 }
 
+func TestProxyManager_SleepSingleModel(t *testing.T) {
+	const testGroupId = "testGroup"
+	cfg := testConfigFromYAML(t, `
+healthCheckTimeout: 15
+logLevel: error
+models:
+  model1:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model1
+    sleepMode: enable
+    sleepEndpoints:
+      - endpoint: /sleep
+        method: POST
+        timeout: 5
+    wakeEndpoints:
+      - endpoint: /wake_up
+        method: POST
+        timeout: 5
+  model2:
+    cmd: {{RESPONDER}} --port ${PORT} --silent --respond model2
+groups:
+  testGroup:
+    swap: false
+    members:
+      - model1
+      - model2
+`)
+
+	proxy := New(cfg)
+	defer proxy.StopProcesses(StopImmediately)
+
+	// Start model1
+	reqBody := `{"model":"model1"}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	w := CreateTestResponseRecorder()
+	proxy.ServeHTTP(w, req)
+
+	assert.Equal(t, StateReady, proxy.processGroups[testGroupId].processes["model1"].CurrentState())
+
+	// Call sleep endpoint
+	req = httptest.NewRequest("POST", "/api/models/sleep/model1", nil)
+	w = CreateTestResponseRecorder()
+	proxy.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "OK", w.Body.String())
+
+	// Wait a bit for sleep to complete (sleep endpoints are called asynchronously)
+	time.Sleep(500 * time.Millisecond)
+
+	assert.Equal(t, StateAsleep, proxy.processGroups[testGroupId].processes["model1"].CurrentState())
+	assert.Equal(t, StateStopped, proxy.processGroups[testGroupId].processes["model2"].CurrentState())
+}
+
 // Test issue #61 `Listing the current list of models and the loaded model.`
 func TestProxyManager_RunningEndpoint(t *testing.T) {
 	// Shared configuration

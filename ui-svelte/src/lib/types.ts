@@ -10,6 +10,7 @@ export interface Model {
   unlisted: boolean;
   peerID: string;
   aliases?: string[];
+  sleepMode?: "enable" | "disable";
 }
 
 export interface TokenMetrics {

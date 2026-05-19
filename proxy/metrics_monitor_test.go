@@ -14,8 +14,8 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/mostlygeek/llama-swap/event"
-	"github.com/mostlygeek/llama-swap/proxy/cache"
+	"github.com/napmany/llmsnap/event"
+	"github.com/napmany/llmsnap/proxy/cache"
 	"github.com/stretchr/testify/assert"
 	"github.com/tidwall/gjson"
 )
@@ -717,19 +717,17 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
-		assert.Equal(t, 10, metrics[0].InputTokens)
-		assert.Equal(t, 20, metrics[0].OutputTokens)
-		// Should calculate speed: 20 tokens / 2 seconds = ~10 tokens/sec
-		// Allow some variance due to timing precision
-		assert.Greater(t, metrics[0].TokensPerSecond, 8.0)
-		assert.Less(t, metrics[0].TokensPerSecond, 12.0)
-		// PromptPerSecond should remain unknown
-		assert.Equal(t, -1.0, metrics[0].PromptPerSecond)
+		assert.Equal(t, 10, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 20, metrics[0].Tokens.OutputTokens)
+		// TokensPerSecond is -1 when timings are absent (not calculated)
+		assert.Equal(t, -1.0, metrics[0].Tokens.TokensPerSecond)
+		// PromptPerSecond is also -1 when timings are absent
+		assert.Equal(t, -1.0, metrics[0].Tokens.PromptPerSecond)
 	})
 
 	t.Run("prefers backend timings over calculation", func(t *testing.T) {
@@ -765,15 +763,15 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
-		// Should use backend timings, NOT calculated values
-		assert.Equal(t, 25.5, metrics[0].TokensPerSecond)
-		assert.Equal(t, 150.5, metrics[0].PromptPerSecond)
-		assert.Equal(t, 1500, metrics[0].DurationMs) // 500 + 1000 from timings
+		// DurationMs uses max(wall duration, timings duration), allow 1ms variance
+		assert.GreaterOrEqual(t, metrics[0].DurationMs, 2000)
+		assert.Equal(t, 25.5, metrics[0].Tokens.TokensPerSecond)
+		assert.Equal(t, 150.5, metrics[0].Tokens.PromptPerSecond)
 	})
 
 	t.Run("handles zero output tokens", func(t *testing.T) {
@@ -799,15 +797,15 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
-		assert.Equal(t, 10, metrics[0].InputTokens)
-		assert.Equal(t, 0, metrics[0].OutputTokens)
+		assert.Equal(t, 10, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 0, metrics[0].Tokens.OutputTokens)
 		// TokensPerSecond should remain -1 (unknown), not divide by zero
-		assert.Equal(t, -1.0, metrics[0].TokensPerSecond)
+		assert.Equal(t, -1.0, metrics[0].Tokens.TokensPerSecond)
 	})
 
 	t.Run("handles very fast responses", func(t *testing.T) {
@@ -833,20 +831,20 @@ func TestMetricsMonitor_ParseMetrics(t *testing.T) {
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
-		assert.Equal(t, 5, metrics[0].InputTokens)
-		assert.Equal(t, 2, metrics[0].OutputTokens)
+		assert.Equal(t, 5, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 2, metrics[0].Tokens.OutputTokens)
 		// Should handle very fast responses without panicking
 		// Speed may be very high but should be calculated if duration > 0
 		if metrics[0].DurationMs > 0 {
-			assert.Greater(t, metrics[0].TokensPerSecond, 0.0)
+			assert.Greater(t, metrics[0].Tokens.TokensPerSecond, 0.0)
 		} else {
 			// If duration is exactly 0, speed stays -1
-			assert.Equal(t, -1.0, metrics[0].TokensPerSecond)
+			assert.Equal(t, -1.0, metrics[0].Tokens.TokensPerSecond)
 		}
 	})
 }
@@ -1112,19 +1110,19 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		// Should track the request even without usage data
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
 		assert.Equal(t, "test-model", metrics[0].Model)
-		// Unknown values should be 0 or -1
-		assert.Equal(t, 0, metrics[0].InputTokens)
-		assert.Equal(t, 0, metrics[0].OutputTokens)
-		assert.Equal(t, -1, metrics[0].CachedTokens)
-		assert.Equal(t, -1.0, metrics[0].PromptPerSecond)
-		assert.Equal(t, -1.0, metrics[0].TokensPerSecond)
+		// Unknown values are 0 when no usage data is present
+		assert.Equal(t, 0, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 0, metrics[0].Tokens.OutputTokens)
+		assert.Equal(t, 0, metrics[0].Tokens.CachedTokens)
+		assert.Equal(t, 0.0, metrics[0].Tokens.PromptPerSecond)
+		assert.Equal(t, 0.0, metrics[0].Tokens.TokensPerSecond)
 	})
 
 	t.Run("gracefully handles non-streaming response without usage data", func(t *testing.T) {
@@ -1144,19 +1142,19 @@ data: [DONE]
 		rec := httptest.NewRecorder()
 		ginCtx, _ := gin.CreateTestContext(rec)
 
-		err := mm.wrapHandler("test-model", ginCtx.Writer, req, nextHandler)
+		err := mm.wrapHandler("test-model", ginCtx.Writer, req, captureNone, nextHandler)
 		assert.NoError(t, err)
 
 		// Should track the request even without usage data
 		metrics := mm.getMetrics()
 		assert.Equal(t, 1, len(metrics))
 		assert.Equal(t, "test-model", metrics[0].Model)
-		// Unknown values should be 0 or -1
-		assert.Equal(t, 0, metrics[0].InputTokens)
-		assert.Equal(t, 0, metrics[0].OutputTokens)
-		assert.Equal(t, -1, metrics[0].CachedTokens)
-		assert.Equal(t, -1.0, metrics[0].PromptPerSecond)
-		assert.Equal(t, -1.0, metrics[0].TokensPerSecond)
+		// Unknown values are 0 when no usage data is present
+		assert.Equal(t, 0, metrics[0].Tokens.InputTokens)
+		assert.Equal(t, 0, metrics[0].Tokens.OutputTokens)
+		assert.Equal(t, 0, metrics[0].Tokens.CachedTokens)
+		assert.Equal(t, 0.0, metrics[0].Tokens.PromptPerSecond)
+		assert.Equal(t, 0.0, metrics[0].Tokens.TokensPerSecond)
 	})
 }
 

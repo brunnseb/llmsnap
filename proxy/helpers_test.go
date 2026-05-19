@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/napmany/llmsnap/internal/logmon"
+	"github.com/napmany/llmsnap/proxy/config"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v3"
@@ -87,6 +87,18 @@ func testConfigFromYAML(t *testing.T, yamlTmpl string) config.Config {
 
 func getTestSimpleResponderConfig(expectedMessage string) config.ModelConfig {
 	return getTestSimpleResponderConfigPort(expectedMessage, getTestPort())
+}
+
+func getTestSimpleResponderConfigWithSleep(expectedMessage string) config.ModelConfig {
+	cfg := getTestSimpleResponderConfig(expectedMessage)
+	cfg.SleepMode = config.SleepModeEnable
+	cfg.SleepEndpoints = []config.HTTPEndpoint{
+		{Endpoint: "/sleep", Method: "POST", Timeout: 5},
+	}
+	cfg.WakeEndpoints = []config.HTTPEndpoint{
+		{Endpoint: "/wake_up", Method: "POST", Timeout: 5},
+	}
+	return cfg
 }
 
 func getTestSimpleResponderConfigPort(expectedMessage string, port int) config.ModelConfig {
@@ -276,6 +288,17 @@ func newTestHandler(respond string) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "%s %s", r.Method, r.URL.Path)
+	})
+
+	// Sleep and wake endpoints for testing
+	mux.HandleFunc("/sleep", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "sleeping"})
+	})
+
+	mux.HandleFunc("/wake_up", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "awake"})
 	})
 
 	mux.HandleFunc("/sdapi/v1/txt2img", func(w http.ResponseWriter, r *http.Request) {

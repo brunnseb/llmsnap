@@ -15,10 +15,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	"github.com/mostlygeek/llama-swap/event"
-	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/internal/ring"
-	"github.com/mostlygeek/llama-swap/proxy/cache"
+	"github.com/napmany/llmsnap/event"
+	"github.com/napmany/llmsnap/internal/logmon"
+	"github.com/napmany/llmsnap/internal/ring"
+	"github.com/napmany/llmsnap/proxy/cache"
 	"github.com/tidwall/gjson"
 )
 
@@ -631,6 +631,7 @@ func newBodyCopier(w gin.ResponseWriter, requestTime time.Time) *responseBodyCop
 		body:           bodyBuffer,
 		tee:            io.MultiWriter(w, bodyBuffer),
 		start:          time.Now(),
+		requestTime:    requestTime,
 	}
 }
 

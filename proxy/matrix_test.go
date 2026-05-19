@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/napmany/llmsnap/proxy/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +43,7 @@ func TestMatrixSolver_AlreadyRunning(t *testing.T) {
 		nil,
 	)
 
-	result, err := solver.Solve("a", []string{"a"})
+	result, err := solver.Solve("a", []string{"a"}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"a"}, result.TargetSet)
@@ -57,7 +57,7 @@ func TestMatrixSolver_NotInAnySet_RunsAlone(t *testing.T) {
 	)
 
 	// Model "c" not in any set
-	result, err := solver.Solve("c", []string{"a", "b"})
+	result, err := solver.Solve("c", []string{"a", "b"}, "")
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"a", "b"}, result.Evict)
 	assert.Equal(t, []string{"c"}, result.TargetSet)
@@ -69,7 +69,7 @@ func TestMatrixSolver_NotInAnySet_NothingRunning(t *testing.T) {
 		nil,
 	)
 
-	result, err := solver.Solve("c", []string{})
+	result, err := solver.Solve("c", []string{}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"c"}, result.TargetSet)
@@ -82,7 +82,7 @@ func TestMatrixSolver_SingleSet_EvictsNonMembers(t *testing.T) {
 		nil,
 	)
 
-	result, err := solver.Solve("a", []string{"b", "c"})
+	result, err := solver.Solve("a", []string{"b", "c"}, "")
 	require.NoError(t, err)
 	// c is not in the set, so it gets evicted. b is in the set, so it stays.
 	assert.Equal(t, []string{"c"}, result.Evict)
@@ -105,7 +105,7 @@ func TestMatrixSolver_PicksLowestCost(t *testing.T) {
 	// s1 cost: v is in s1, so 0
 	// s2 cost: v is NOT in s2, so 50
 	// => pick s1
-	result, err := solver.Solve("a", []string{"v"})
+	result, err := solver.Solve("a", []string{"v"}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"a", "v"}, result.TargetSet)
@@ -114,7 +114,7 @@ func TestMatrixSolver_PicksLowestCost(t *testing.T) {
 	// s1 cost: L is NOT in s1, so 30
 	// s2 cost: L is in s2, so 0
 	// => pick s2
-	result, err = solver.Solve("a", []string{"L"})
+	result, err = solver.Solve("a", []string{"L"}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"a", "L"}, result.TargetSet)
@@ -131,7 +131,7 @@ func TestMatrixSolver_TieBreakingByDefinitionOrder(t *testing.T) {
 	)
 
 	// Nothing running, both sets cost 0. s1 is first.
-	result, err := solver.Solve("a", []string{})
+	result, err := solver.Solve("a", []string{}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"a", "x"}, result.TargetSet)
@@ -152,7 +152,7 @@ func TestMatrixSolver_EvictCostPreservesExpensive(t *testing.T) {
 		map[string]int{"v": 50},
 	)
 
-	result, err := solver.Solve("g", []string{"v", "m"})
+	result, err := solver.Solve("g", []string{"v", "m"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"m"}, result.Evict)
 	assert.Equal(t, []string{"g", "v"}, result.TargetSet)
@@ -167,7 +167,7 @@ func TestMatrixSolver_NothingRunning(t *testing.T) {
 		nil,
 	)
 
-	result, err := solver.Solve("g", []string{})
+	result, err := solver.Solve("g", []string{}, "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Evict)
 	assert.Equal(t, []string{"g", "v"}, result.TargetSet)
@@ -315,7 +315,7 @@ func TestMatrixSolver_FullScenario(t *testing.T) {
 	// standard[q,v]: evict g (cost 1), keep v. Total: 1.
 	// with_rerank[q,v,e]: evict g (cost 1), keep v. Total: 1.
 	// => tie, pick first by definition order = standard[q,v]
-	result, err := solver.Solve("q", []string{"g", "v"})
+	result, err := solver.Solve("q", []string{"g", "v"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"g"}, result.Evict)
 	assert.Equal(t, []string{"q", "v"}, result.TargetSet)
@@ -323,7 +323,7 @@ func TestMatrixSolver_FullScenario(t *testing.T) {
 	// Running: g, v. Request L.
 	// full[L]: evict g (cost 1) + v (cost 50). Total: 51.
 	// Only one set contains L, so pick it.
-	result, err = solver.Solve("L", []string{"g", "v"})
+	result, err = solver.Solve("L", []string{"g", "v"}, "")
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"g", "v"}, result.Evict)
 	assert.Equal(t, []string{"L"}, result.TargetSet)
@@ -332,7 +332,7 @@ func TestMatrixSolver_FullScenario(t *testing.T) {
 	// creative[g,sd]: evict v (cost 50). Total: 50.
 	// creative[q,sd]: evict g (cost 1) + v (cost 50). Total: 51.
 	// => pick creative[g,sd]
-	result, err = solver.Solve("sd", []string{"g", "v"})
+	result, err = solver.Solve("sd", []string{"g", "v"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"v"}, result.Evict)
 	assert.Equal(t, []string{"g", "sd"}, result.TargetSet)
@@ -342,7 +342,7 @@ func TestMatrixSolver_FullScenario(t *testing.T) {
 	// with_rerank[g,v,e]: evict q (1). Total: 1.
 	// creative[g,sd]: evict q (1) + v (50) + e (1). Total: 52.
 	// => pick with_rerank[g,v,e]
-	result, err = solver.Solve("g", []string{"e", "q", "v"})
+	result, err = solver.Solve("g", []string{"e", "q", "v"}, "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"q"}, result.Evict)
 	assert.Equal(t, []string{"e", "g", "v"}, result.TargetSet)

@@ -18,9 +18,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mostlygeek/llama-swap/event"
-	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/napmany/llmsnap/event"
+	"github.com/napmany/llmsnap/internal/logmon"
+	"github.com/napmany/llmsnap/proxy/config"
 )
 
 type ProcessState string

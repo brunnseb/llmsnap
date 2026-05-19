@@ -480,17 +480,6 @@ func LoadConfigFromReader(r io.Reader) (Config, error) {
 		}
 
 		// Set default timeouts on sleep/wake endpoints if not already configured
-		// Use global config timeout values as defaults
-		for i := range modelConfig.SleepEndpoints {
-			if modelConfig.SleepEndpoints[i].Timeout == 0 {
-				modelConfig.SleepEndpoints[i].Timeout = config.SleepRequestTimeout
-			}
-		}
-		for i := range modelConfig.WakeEndpoints {
-			if modelConfig.WakeEndpoints[i].Timeout == 0 {
-				modelConfig.WakeEndpoints[i].Timeout = config.WakeRequestTimeout
-			}
-		}
 
 		config.Models[modelId] = modelConfig
 	}

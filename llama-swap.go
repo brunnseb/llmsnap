@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mostlygeek/llama-swap/event"
-	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/internal/perf"
-	"github.com/mostlygeek/llama-swap/proxy"
-	"github.com/mostlygeek/llama-swap/proxy/config"
-	"github.com/mostlygeek/llama-swap/proxy/configwatcher"
+	"github.com/napmany/llmsnap/event"
+	"github.com/napmany/llmsnap/internal/logmon"
+	"github.com/napmany/llmsnap/internal/perf"
+	"github.com/napmany/llmsnap/proxy"
+	"github.com/napmany/llmsnap/proxy/config"
+	"github.com/napmany/llmsnap/proxy/configwatcher"
 )
 
 var (
@@ -232,7 +232,7 @@ func main() {
 	go func() {
 		var err error
 		if useTLS {
-		mainLogger.Infof("llama-swap listening with TLS on https://%s", *listenStr)
+			mainLogger.Infof("llama-swap listening with TLS on https://%s", *listenStr)
 			err = srv.ListenAndServeTLS(*certFile, *keyFile)
 		} else {
 			mainLogger.Infof("llama-swap listening on http://%s", *listenStr)

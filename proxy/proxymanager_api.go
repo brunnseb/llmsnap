@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mostlygeek/llama-swap/event"
-	"github.com/mostlygeek/llama-swap/internal/perf"
+	"github.com/napmany/llmsnap/event"
+	"github.com/napmany/llmsnap/internal/perf"
 )
 
 type Model struct {
@@ -23,6 +23,7 @@ type Model struct {
 	Unlisted    bool     `json:"unlisted"`
 	PeerID      string   `json:"peerID"`
 	Aliases     []string `json:"aliases,omitempty"`
+	SleepMode   string   `json:"sleepMode,omitempty"`
 }
 
 func addApiHandlers(pm *ProxyManager) {
@@ -81,6 +82,12 @@ func (pm *ProxyManager) getModelStatus() []Model {
 				state = "shutdown"
 			case StateStopped:
 				state = "stopped"
+			case StateSleepPending:
+				state = "sleepPending"
+			case StateAsleep:
+				state = "asleep"
+			case StateWaking:
+				state = "waking"
 			}
 		}
 		models = append(models, Model{
@@ -90,6 +97,7 @@ func (pm *ProxyManager) getModelStatus() []Model {
 			State:       state,
 			Unlisted:    pm.config.Models[modelID].Unlisted,
 			Aliases:     pm.config.Models[modelID].Aliases,
+			SleepMode:   string(pm.config.Models[modelID].SleepMode),
 		})
 	}
 
@@ -336,18 +344,23 @@ func (pm *ProxyManager) apiSleepSingleModelHandler(c *gin.Context) {
 		return
 	}
 
-	processGroup := pm.findGroupByModelName(realModelName)
-	if processGroup == nil {
-		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("process group not found for model %s", requestedModel))
-		return
+	var err error
+	if pm.matrix != nil {
+		err = pm.matrix.SleepProcess(realModelName)
+	} else {
+		processGroup := pm.findGroupByModelName(realModelName)
+		if processGroup == nil {
+			pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("process group not found for model %s", requestedModel))
+			return
+		}
+		err = processGroup.SleepProcess(realModelName)
 	}
 
-	if err := processGroup.SleepProcess(realModelName); err != nil {
+	if err != nil {
 		pm.sendErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("error sleeping process: %s", err.Error()))
 		return
-	} else {
-		c.String(http.StatusOK, "OK")
 	}
+	c.String(http.StatusOK, "OK")
 }
 
 func (pm *ProxyManager) apiGetVersion(c *gin.Context) {

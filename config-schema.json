@@ -82,6 +82,45 @@
             },
             "additionalProperties": false,
             "description": "Timeout settings for proxy connections."
+        },
+
+        "httpEndpoint": {
+            "type": "object",
+            "required": [
+                "endpoint",
+                "method"
+            ],
+            "properties": {
+                "endpoint": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^/.*$",
+                    "description": "URL path to call (e.g., /sleep, /wake_up)"
+                },
+                "method": {
+                    "type": "string",
+                    "enum": [
+                        "GET",
+                        "POST",
+                        "PUT",
+                        "PATCH"
+                    ],
+                    "description": "HTTP method to use"
+                },
+                "body": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional JSON request body as string"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 10,
+                    "description": "Timeout for this endpoint in seconds"
+                }
+            },
+            "additionalProperties": false,
+            "description": "Configuration for a single HTTP endpoint call."
         }
     },
     "properties": {
@@ -306,6 +345,31 @@
                     },
                     "timeouts": {
                         "$ref": "#/definitions/timeouts"
+                    },
+                    "sleepMode": {
+                        "type": "string",
+                        "enum": [
+                            "enable",
+                            "disable"
+                        ],
+                        "default": "disable",
+                        "description": "Controls sleep/wake behavior for GPU memory preservation. When enabled, models are put to sleep (instead of stopped) when idle, keeping GPU state for faster wake-up."
+                    },
+                    "sleepEndpoints": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/definitions/httpEndpoint"
+                        },
+                        "default": [],
+                        "description": "Array of HTTP endpoints to call when putting a model to sleep. Each endpoint is called in sequence. Required when sleepMode is 'enable'."
+                    },
+                    "wakeEndpoints": {
+                        "type": "array",
+                        "items": {
+                            "$ref": "#/definitions/httpEndpoint"
+                        },
+                        "default": [],
+                        "description": "Array of HTTP endpoints to call when waking a model from sleep. Each endpoint is called in sequence. Required when sleepMode is 'enable'."
                     }
                 }
             }

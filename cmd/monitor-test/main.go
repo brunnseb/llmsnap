@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mostlygeek/llama-swap/internal/logmon"
-	"github.com/mostlygeek/llama-swap/internal/perf"
-	"github.com/mostlygeek/llama-swap/proxy/config"
+	"github.com/napmany/llmsnap/internal/logmon"
+	"github.com/napmany/llmsnap/internal/perf"
+	"github.com/napmany/llmsnap/proxy/config"
 )
 
 func printSysStat(s perf.SysStat) {
