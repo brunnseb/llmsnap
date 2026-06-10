@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMatrix_WhenModelAsleep_OtherModelEvicted verifies that when waking an asleep model,
-// any currently running model is evicted. This tests the fix for the bug where sleeping
-// models were incorrectly counted as "running", preventing eviction from happening.
+// TestMatrix_WhenModelAsleep_OtherModelEvicted verifies that waking an asleep model
+// evicts running models not in the same set. model1 and model2 are in separate sets,
+// so waking model1 evicts model2 per normal matrix eviction rules.
 func TestMatrix_WhenModelAsleep_OtherModelEvicted(t *testing.T) {
 	cfg := config.Config{
 		HealthCheckTimeout: 15,
@@ -103,4 +103,57 @@ func TestMatrix_RunningModelsExcludesAsleep(t *testing.T) {
 	// Now no models should be in the running list
 	running = m.RunningModels()
 	assert.Len(t, running, 0, "No models should be counted as running when model1 is asleep")
+}
+
+// TestMatrix_WakePreservesCoLoadedModel verifies that waking an asleep model does NOT
+// evict co-loaded models that belong to the same set. model1 and model2 are in the same
+// set, so waking model1 should keep model2 running.
+func TestMatrix_WakePreservesCoLoadedModel(t *testing.T) {
+	cfg := config.Config{
+		HealthCheckTimeout: 15,
+		Models: map[string]config.ModelConfig{
+			"model1": getTestSimpleResponderConfig("model1"),
+			"model2": getTestSimpleResponderConfig("model2"),
+		},
+		ExpandedSets: []config.ExpandedSet{
+			{SetName: "shared", Models: []string{"model1", "model2"}},
+		},
+		Matrix: &config.MatrixConfig{},
+	}
+
+	m := NewMatrix(cfg, testLogger, testLogger)
+	defer m.StopProcesses(StopImmediately)
+
+	m.processes["model1"].testHandler = newTestHandler("model1")
+	m.processes["model2"].testHandler = newTestHandler("model2")
+
+	// Load both models
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	require.NoError(t, m.ProxyRequest("model1", w, req))
+	assert.Equal(t, StateReady, m.processes["model1"].CurrentState())
+
+	req2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w2 := httptest.NewRecorder()
+	require.NoError(t, m.ProxyRequest("model2", w2, req2))
+	assert.Equal(t, StateReady, m.processes["model2"].CurrentState())
+
+	// Put model1 to sleep
+	m.processes["model1"].forceState(StateAsleep)
+	assert.Equal(t, StateAsleep, m.processes["model1"].CurrentState())
+
+	// model2 should still be running
+	running := m.RunningModels()
+	assert.Len(t, running, 1)
+	assert.Contains(t, running, "model2")
+
+	// Wake model1 - model2 should NOT be evicted because they're in the same set
+	req3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	w3 := httptest.NewRecorder()
+	require.NoError(t, m.ProxyRequest("model1", w3, req3))
+
+	// Both models should be ready
+	assert.Equal(t, StateReady, m.processes["model1"].CurrentState())
+	assert.Equal(t, StateReady, m.processes["model2"].CurrentState(),
+		"Co-loaded model should not be evicted when waking a model in the same set")
 }

@@ -50,13 +50,10 @@ type SolveResult struct {
 //  1. If requestedModel is already running, no eviction needed.
 //  2. Find all sets containing requestedModel.
 //  3. If no sets found, the model runs alone; evict all running models.
-//  4. If asleepModel is set (model needs to wake), compute cost as sum of
-//     evict_costs for running models IN the same set (waking requires
-//     freeing their GPU resources). Otherwise, compute cost as sum of
-//     evict_costs for running models NOT in that set.
-//  5. Pick lowest cost. Ties broken by definition order (index in expandedSets).
-//  6. Return models to evict and the chosen set.
-func (s *MatrixSolver) Solve(requestedModel string, runningModels []string, asleepModel string) (SolveResult, error) {
+//  4. Compute cost as sum of evict_costs for running models NOT in each
+//     candidate set. Pick lowest cost. Ties broken by definition order.
+//  5. Return models to evict and the chosen set.
+func (s *MatrixSolver) Solve(requestedModel string, runningModels []string) (SolveResult, error) {
 	// If already running, nothing to do (but fill in set info for logging)
 	if slices.Contains(runningModels, requestedModel) {
 		setName, dsl := s.findMatchingSet(requestedModel, runningModels)
@@ -87,11 +84,7 @@ func (s *MatrixSolver) Solve(requestedModel string, runningModels []string, asle
 		setModels := s.expandedSets[idx].Models
 		cost := 0
 		for _, running := range runningModels {
-			if asleepModel != "" {
-				// Wake scenario: count ALL running models (both inside and outside the set)
-				cost += s.evictCost(running)
-			} else if !slices.Contains(setModels, running) {
-				// Normal scenario: count running models outside the set
+			if !slices.Contains(setModels, running) {
 				cost += s.evictCost(running)
 			}
 		}
@@ -106,15 +99,10 @@ func (s *MatrixSolver) Solve(requestedModel string, runningModels []string, asle
 	chosen := s.expandedSets[bestIdx]
 	var evict []string
 	for _, running := range runningModels {
-		if asleepModel != "" {
-			// Wake scenario: evict ALL running models
-			evict = append(evict, running)
-		} else if !slices.Contains(chosen.Models, running) {
-			// Normal scenario: evict running models outside the set
+		if !slices.Contains(chosen.Models, running) {
 			evict = append(evict, running)
 		}
 	}
-
 	return SolveResult{
 		Evict:     evict,
 		TargetSet: chosen.Models,
@@ -205,13 +193,7 @@ func (m *Matrix) ProxyRequest(modelID string, w http.ResponseWriter, r *http.Req
 	m.Lock()
 	running := m.runningModels()
 
-	// Check if the requested model is asleep (needs to wake)
-	var asleepModel string
-	if process.CurrentState() == StateAsleep {
-		asleepModel = modelID
-	}
-
-	result, err := m.solver.Solve(modelID, running, asleepModel)
+	result, err := m.solver.Solve(modelID, running)
 	if err != nil {
 		m.Unlock()
 		return fmt.Errorf("matrix solver error: %w", err)
